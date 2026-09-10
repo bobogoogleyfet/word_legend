@@ -21,6 +21,9 @@ const PANIC_TIME: f32 = 15.0;
 
 pub struct WordLegendApp {
     game: Game,
+    /// Where the cursor was last frame, so a drag can be traced as a segment
+    /// rather than sampled as isolated points.
+    drag_from: Option<Pos2>,
     /// Drives the tile "pop" when a word lands, independent of game state.
     elapsed: f32,
 }
@@ -29,6 +32,7 @@ impl WordLegendApp {
     pub fn new() -> Self {
         Self {
             game: Game::new(),
+            drag_from: None,
             elapsed: 0.0,
         }
     }
@@ -260,84 +264,68 @@ impl WordLegendApp {
     }
 
     fn board(&mut self, ui: &mut egui::Ui, board_size: f32) {
-        let gap = board_size * 0.035;
-        let tile_size = (board_size - gap * 5.0) / SIZE as f32;
-
         let (response, painter) =
             ui.allocate_painter(Vec2::splat(board_size), Sense::click_and_drag());
-        let origin = response.rect.min;
+        let geom = BoardGeometry::new(response.rect.min, board_size);
 
-        let tile_rect = |row: usize, col: usize| {
-            Rect::from_min_size(
-                origin
-                    + Vec2::new(
-                        gap + col as f32 * (tile_size + gap),
-                        gap + row as f32 * (tile_size + gap),
-                    ),
-                Vec2::splat(tile_size),
-            )
-        };
+        self.handle_board_input(&response, &geom);
 
-        // Generous hit boxes: the gaps between tiles belong to the nearest tile so
-        // a fast drag never skips a letter.
-        let hit = |pos: Pos2| -> Option<Position> {
-            let local = pos - origin;
-            let step = tile_size + gap;
-            let col = ((local.x - gap * 0.5) / step).floor();
-            let row = ((local.y - gap * 0.5) / step).floor();
-            if row < 0.0 || col < 0.0 || row >= SIZE as f32 || col >= SIZE as f32 {
-                return None;
-            }
-            Some(Position { row: row as usize, col: col as usize })
-        };
-
-        self.handle_board_input(&response, hit);
-
-        self.draw_trail(&painter, &tile_rect);
+        self.draw_trail(&painter, &geom);
 
         for row in 0..SIZE {
             for col in 0..SIZE {
-                self.draw_tile(&painter, tile_rect(row, col), Position { row, col });
+                let at = Position { row, col };
+                self.draw_tile(&painter, geom.rect(at), at);
             }
         }
 
         self.draw_score_popup(&painter, response.rect);
     }
 
-    fn handle_board_input(
-        &mut self,
-        response: &egui::Response,
-        hit: impl Fn(Pos2) -> Option<Position>,
-    ) {
+    fn handle_board_input(&mut self, response: &egui::Response, geom: &BoardGeometry) {
         if self.game.phase != Phase::Playing {
             return;
         }
 
-        if let Some(pos) = response.interact_pointer_pos().and_then(&hit) {
-            if response.drag_started() {
-                self.game.is_dragging = true;
-                self.game.begin_path(pos);
-            } else if response.dragged() && self.game.is_dragging {
-                self.game.extend_path(pos);
-            } else if response.clicked() {
+        let pointer = response.interact_pointer_pos();
+
+        if response.drag_started() {
+            self.game.is_dragging = true;
+            self.game.clear_path();
+            if let Some(at) = pointer.and_then(|p| geom.tile_at(p)) {
+                self.game.begin_path(at);
+            }
+            self.drag_from = pointer;
+        } else if response.dragged() && self.game.is_dragging {
+            if let Some(to) = pointer {
+                // Follow the cursor's actual travel since the last frame. Sampling
+                // only the current position lets a quick flick jump clean over a
+                // tile, which then silently fails the adjacency check.
+                let from = self.drag_from.unwrap_or(to);
+                for at in geom.tiles_along(from, to) {
+                    self.game.extend_path(at);
+                }
+                self.drag_from = Some(to);
+            }
+        } else if response.clicked() {
+            if let Some(at) = pointer.and_then(|p| geom.tile_at(p)) {
                 // Click-to-chain: tap letters in turn, tap the last one again to submit.
                 match self.game.path.last() {
-                    Some(&last) if last == pos => self.game.submit_path(),
-                    Some(_) => self.game.extend_path(pos),
-                    None => self.game.begin_path(pos),
+                    Some(&last) if last == at => self.game.submit_path(),
+                    Some(_) => self.game.extend_path(at),
+                    None => self.game.begin_path(at),
                 }
             }
         }
 
-        if response.drag_stopped() {
-            if self.game.is_dragging {
-                self.game.is_dragging = false;
-                // A one-tile drag is a mis-click, not an attempt at a word.
-                if self.game.path.len() > 1 {
-                    self.game.submit_path();
-                } else {
-                    self.game.clear_path();
-                }
+        if response.drag_stopped() && self.game.is_dragging {
+            self.game.is_dragging = false;
+            self.drag_from = None;
+            // A one-tile drag is a mis-click, not an attempt at a word.
+            if self.game.path.len() > 1 {
+                self.game.submit_path();
+            } else {
+                self.game.clear_path();
             }
         }
     }
@@ -382,18 +370,13 @@ impl WordLegendApp {
         );
     }
 
-    fn draw_trail(&self, painter: &egui::Painter, tile_rect: &impl Fn(usize, usize) -> Rect) {
+    fn draw_trail(&self, painter: &egui::Painter, geom: &BoardGeometry) {
         if self.game.path.len() < 2 {
             return;
         }
 
         let color = if self.game.current_word_is_valid() { GREEN } else { ACCENT };
-        let centers: Vec<Pos2> = self
-            .game
-            .path
-            .iter()
-            .map(|p| tile_rect(p.row, p.col).center())
-            .collect();
+        let centers: Vec<Pos2> = self.game.path.iter().map(|p| geom.center(*p)).collect();
 
         for pair in centers.windows(2) {
             painter.line_segment([pair[0], pair[1]], Stroke::new(12.0_f32, color.gamma_multiply(0.7)));
@@ -679,6 +662,80 @@ impl WordLegendApp {
     }
 }
 
+/// Where the tiles sit, and which one a point is on.
+///
+/// The gaps between tiles deliberately belong to *no* tile. An earlier version
+/// assigned them to the nearest neighbour so that fast drags could not skip a
+/// letter, but that made the point where four tiles meet resolve to one of them:
+/// dragging diagonally clipped a corner and picked up a letter nobody aimed at,
+/// and if that letter was already in the word, the revisit rewound the path and
+/// destroyed it mid-drag. Skipping is prevented by tracing the cursor's travel
+/// instead -- see `tiles_along`.
+pub struct BoardGeometry {
+    origin: Pos2,
+    tile: f32,
+    gap: f32,
+}
+
+impl BoardGeometry {
+    pub fn new(origin: Pos2, board_size: f32) -> Self {
+        let gap = board_size * 0.035;
+        let tile = (board_size - gap * (SIZE as f32 + 1.0)) / SIZE as f32;
+        Self { origin, tile, gap }
+    }
+
+    pub fn rect(&self, at: Position) -> Rect {
+        let step = self.tile + self.gap;
+        Rect::from_min_size(
+            self.origin
+                + Vec2::new(
+                    self.gap + at.col as f32 * step,
+                    self.gap + at.row as f32 * step,
+                ),
+            Vec2::splat(self.tile),
+        )
+    }
+
+    pub fn center(&self, at: Position) -> Pos2 {
+        self.rect(at).center()
+    }
+
+    /// The tile under a point, or `None` in the gaps and outside the board.
+    pub fn tile_at(&self, pos: Pos2) -> Option<Position> {
+        let local = pos - self.origin;
+        let step = self.tile + self.gap;
+        let col = ((local.x - self.gap) / step).floor();
+        let row = ((local.y - self.gap) / step).floor();
+        if row < 0.0 || col < 0.0 || row >= SIZE as f32 || col >= SIZE as f32 {
+            return None;
+        }
+        let at = Position { row: row as usize, col: col as usize };
+        // The floor above only narrows it to a candidate; the point still has to
+        // land on the tile itself rather than in the gap after it.
+        self.rect(at).contains(pos).then_some(at)
+    }
+
+    /// Every tile the segment `from` -> `to` passes over, in order, without repeats.
+    pub fn tiles_along(&self, from: Pos2, to: Pos2) -> Vec<Position> {
+        // A quarter of a tile is fine enough that the segment cannot cross a whole
+        // tile between samples, and coarse enough to stay cheap.
+        let stride = (self.tile * 0.25).max(1.0);
+        let steps = ((from.distance(to) / stride).ceil() as usize).clamp(1, 256);
+
+        let mut out: Vec<Position> = Vec::new();
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            let point = from + (to - from) * t;
+            if let Some(at) = self.tile_at(point) {
+                if out.last() != Some(&at) {
+                    out.push(at);
+                }
+            }
+        }
+        out
+    }
+}
+
 fn league_color(league: usize) -> Color32 {
     match league {
         0 => Color32::from_rgb(0xc0, 0x84, 0x57), // bronze
@@ -809,6 +866,92 @@ mod tests {
 
         let over = overlay_rect(&mut app, |a, ctx| a.overlay_results(ctx));
         assert!(screen.contains_rect(over), "results card overflows: {over:?}");
+    }
+
+    fn geom() -> BoardGeometry {
+        BoardGeometry::new(Pos2::ZERO, 460.0)
+    }
+
+    #[test]
+    fn every_tile_centre_hits_its_own_tile() {
+        let g = geom();
+        for row in 0..SIZE {
+            for col in 0..SIZE {
+                let at = Position { row, col };
+                assert_eq!(g.tile_at(g.center(at)), Some(at));
+            }
+        }
+    }
+
+    #[test]
+    fn the_gaps_belong_to_no_tile() {
+        let g = geom();
+        let a = g.rect(Position { row: 0, col: 0 });
+        let b = g.rect(Position { row: 0, col: 1 });
+        // Halfway between two tiles, horizontally.
+        let between = Pos2::new((a.max.x + b.min.x) * 0.5, a.center().y);
+        assert_eq!(g.tile_at(between), None);
+
+        // The point where four tiles meet: the one that used to resolve to a
+        // neighbour and inject a letter into a diagonal drag.
+        let corner = Pos2::new((a.max.x + b.min.x) * 0.5, (a.max.y + g.gap * 0.5).max(a.max.y));
+        assert_eq!(g.tile_at(Pos2::new(corner.x, a.max.y + g.gap * 0.5)), None);
+    }
+
+    #[test]
+    fn a_diagonal_drag_does_not_clip_its_neighbours() {
+        let g = geom();
+        let (p, o) = (Position { row: 0, col: 0 }, Position { row: 1, col: 1 });
+        let (t, s) = (Position { row: 0, col: 1 }, Position { row: 1, col: 0 });
+
+        // The tile the drag starts on is included, which is harmless: re-offering
+        // the tile already at the head of the path is a no-op.
+        //
+        // What matters is that neither neighbour appears. P -> O passes through
+        // the point where all four tiles meet.
+        let crossed = g.tiles_along(g.center(p), g.center(o));
+        assert_eq!(crossed, vec![p, o], "diagonal picked up {crossed:?}");
+        assert!(!crossed.contains(&t) && !crossed.contains(&s));
+
+        // The return diagonal must not pick up P or O either: in a P-O-T-S trace
+        // both are already in the word, so a stray hit would rewind it.
+        let crossed = g.tiles_along(g.center(t), g.center(s));
+        assert_eq!(crossed, vec![t, s], "diagonal picked up {crossed:?}");
+        assert!(!crossed.contains(&p) && !crossed.contains(&o));
+    }
+
+    /// The exact path from the bug report: P top-left, diagonal to O, up to T,
+    /// diagonal again to S, spelling POTS around a 2x2 square.
+    #[test]
+    fn tracing_a_square_keeps_every_letter() {
+        let g = geom();
+        let mut game = Game::new();
+        game.phase = Phase::Playing;
+
+        let corners = [
+            Position { row: 0, col: 0 }, // P
+            Position { row: 1, col: 1 }, // O
+            Position { row: 0, col: 1 }, // T
+            Position { row: 1, col: 0 }, // S
+        ];
+
+        game.begin_path(corners[0]);
+        for pair in corners.windows(2) {
+            for at in g.tiles_along(g.center(pair[0]), g.center(pair[1])) {
+                game.extend_path(at);
+            }
+        }
+
+        assert_eq!(game.path, corners, "the square trace lost or rewound letters");
+    }
+
+    #[test]
+    fn a_fast_flick_across_a_row_skips_nothing() {
+        let g = geom();
+        let row: Vec<Position> = (0..SIZE).map(|col| Position { row: 2, col }).collect();
+        // One frame, all the way across: every tile in between must still register.
+        let crossed = g.tiles_along(g.center(row[0]), g.center(row[SIZE - 1]));
+        assert_eq!(crossed, row, "a flick skipped a letter: {crossed:?}");
     }
 
     #[test]
