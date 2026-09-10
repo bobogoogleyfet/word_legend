@@ -15,12 +15,18 @@ const GREEN: Color32 = Color32::from_rgb(0x3d, 0xdc, 0x84);
 const RED: Color32 = Color32::from_rgb(0xff, 0x5c, 0x5c);
 const AMBER: Color32 = Color32::from_rgb(0xff, 0xb4, 0x54);
 const GOLD: Color32 = Color32::from_rgb(0xff, 0xd1, 0x66);
+const BLUE: Color32 = Color32::from_rgb(0x5b, 0x8c, 0xff);
+
+/// Below this window height the results card cannot fit and has to scroll.
+const SHORT_WINDOW: f32 = 720.0;
 
 /// Seconds left at which the clock starts pulsing red.
 const PANIC_TIME: f32 = 15.0;
 
 pub struct WordLegendApp {
     game: Game,
+    /// Which of the Common / Obscure / Theme tabs the scorecard is showing.
+    results_tab: usize,
     /// Where the cursor was last frame, so a drag can be traced as a segment
     /// rather than sampled as isolated points.
     drag_from: Option<Pos2>,
@@ -32,6 +38,7 @@ impl WordLegendApp {
     pub fn new() -> Self {
         Self {
             game: Game::new(),
+            results_tab: 0,
             drag_from: None,
             elapsed: 0.0,
         }
@@ -411,7 +418,7 @@ impl WordLegendApp {
                     .strong(),
             );
             ui.label(
-                egui::RichText::new(format!("/ {} on board", self.game.solutions.len()))
+                egui::RichText::new(format!("/ {} on board", self.game.findable_count()))
                     .size(12.0)
                     .color(MUTED),
             );
@@ -464,7 +471,7 @@ impl WordLegendApp {
             );
 
             ui.add_space(18.0);
-            app.standings_table(ui);
+            app.standings_table(ui, 60.0);
             ui.add_space(16.0);
 
             for line in [
@@ -497,57 +504,37 @@ impl WordLegendApp {
     fn overlay_results(&mut self, ctx: &egui::Context) {
         self.overlay(ctx, |app, ui| {
             ui.label(egui::RichText::new("TIME'S UP").size(15.0).color(MUTED).strong());
-            ui.label(egui::RichText::new(format!("{}", app.game.score)).size(64.0).color(GOLD).strong());
-            ui.label(egui::RichText::new(app.game.rank()).size(24.0).color(ACCENT).strong());
+            ui.label(egui::RichText::new(format!("{}", app.game.score)).size(46.0).color(GOLD).strong());
+            ui.label(egui::RichText::new(app.game.rank()).size(20.0).color(ACCENT).strong());
 
             if app.game.is_new_best() {
-                ui.label(egui::RichText::new("★ NEW PERSONAL BEST").size(14.0).color(GOLD).strong());
+                ui.label(egui::RichText::new("\u{2605} NEW PERSONAL BEST").size(14.0).color(GOLD).strong());
             }
 
-            ui.add_space(18.0);
-            ui.horizontal(|ui| {
-                stat(ui, "WORDS", &format!("{}", app.game.found.len()));
-                ui.add_space(28.0);
-                stat(
-                    ui,
-                    "ON BOARD",
-                    &format!("{}", app.game.solutions.len()),
-                );
-                ui.add_space(28.0);
-                stat(
-                    ui,
-                    "LONGEST",
-                    &app.game
-                        .longest_found()
-                        .map(|w| w.word.to_uppercase())
-                        .unwrap_or_else(|| "—".to_string()),
-                );
+            ui.add_space(14.0);
+
+            // The board you just played, the numbers that came out of it, and where
+            // that leaves you in the league -- side by side, so the card still fits.
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(196.0);
+                    app.used_board(ui, 180.0);
+                });
+                ui.add_space(16.0);
+                ui.vertical(|ui| {
+                    ui.set_width(250.0);
+                    app.round_stats(ui);
+                });
+                ui.add_space(16.0);
+                ui.vertical(|ui| {
+                    ui.set_width(300.0);
+                    app.standings_table(ui, 0.0);
+                });
             });
 
-            ui.add_space(18.0);
+            ui.add_space(12.0);
             app.season_banner(ui);
-            app.standings_table(ui);
-
-            ui.add_space(16.0);
-            ui.label(egui::RichText::new("YOU MISSED").size(12.0).color(MUTED).strong());
-            ui.add_space(4.0);
-
-            egui::ScrollArea::vertical().max_height(84.0).show(ui, |ui| {
-                let missed = app.game.missed_words(40);
-                if missed.is_empty() {
-                    ui.label(egui::RichText::new("Nothing. You cleared the board.").size(14.0).color(GREEN));
-                } else {
-                    ui.horizontal_wrapped(|ui| {
-                        for word in missed {
-                            ui.label(
-                                egui::RichText::new(word.to_uppercase())
-                                    .size(14.0)
-                                    .color(if word.len() >= 6 { GOLD } else { MUTED }),
-                            );
-                        }
-                    });
-                }
-            });
+            app.word_tabs(ui);
 
             ui.add_space(18.0);
             let label = if app.game.season_outcome.is_some() { "NEW SEASON" } else { "NEXT ROUND" };
@@ -557,16 +544,138 @@ impl WordLegendApp {
         });
     }
 
+    /// The played board, with each tile bordered by how hard it worked.
+    fn used_board(&self, ui: &mut egui::Ui, size: f32) {
+        let (response, painter) = ui.allocate_painter(Vec2::splat(size), Sense::hover());
+        let geom = BoardGeometry::new(response.rect.min, size);
+
+        for row in 0..SIZE {
+            for col in 0..SIZE {
+                let at = Position { row, col };
+                let rect = geom.rect(at);
+                let uses = self.game.tile_uses[row][col];
+                let edge = tile_use_color(uses);
+
+                painter.rect_filled(rect, rect.width() * 0.18, TILE);
+                painter.rect_stroke(
+                    rect,
+                    rect.width() * 0.18,
+                    Stroke::new(2.0_f32, edge),
+                    egui::StrokeKind::Inside,
+                );
+                painter.text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    capitalize(self.game.grid[row][col].letters),
+                    FontId::proportional(rect.width() * 0.45),
+                    if uses == 0 { MUTED } else { TEXT },
+                );
+            }
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            for (label, color) in [("unused", BLUE), ("used once", AMBER), ("reused", GREEN)] {
+                ui.label(egui::RichText::new(format!("\u{25a0} {label}")).size(10.0).color(color));
+            }
+        });
+    }
+
+    fn round_stats(&self, ui: &mut egui::Ui) {
+        let g = &self.game;
+        let rows: [(&str, String); 6] = [
+            ("Score", format!("{} / {}", g.score, g.board_par())),
+            (
+                "Words found",
+                format!(
+                    "{} / {}  ({:.0}%)",
+                    g.found_count(),
+                    g.findable_count(),
+                    g.found_fraction() * 100.0
+                ),
+            ),
+            ("Avg points per word", format!("{:.0}", g.average_points())),
+            ("Time per word", format!("{:.1}s", g.seconds_per_word())),
+            ("Avg word length", format!("{:.1}", g.average_word_length())),
+            ("Board type", g.board_type().to_string()),
+        ];
+
+        for (label, value) in rows {
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [150.0, 18.0],
+                    egui::Label::new(egui::RichText::new(label).size(12.0).color(MUTED)),
+                );
+                ui.label(egui::RichText::new(value).size(14.0).color(TEXT).strong());
+            });
+        }
+    }
+
+    /// Common / Obscure / Theme, the way WordHero split its word list.
+    fn word_tabs(&mut self, ui: &mut egui::Ui) {
+        let counts = [
+            self.game.words.common.len(),
+            self.game.words.obscure.len(),
+            self.game.theme_words().len(),
+        ];
+
+        ui.horizontal(|ui| {
+            for (i, name) in ["Common", "Obscure", "Theme"].into_iter().enumerate() {
+                let selected = self.results_tab == i;
+                let text = egui::RichText::new(format!("{name} ({})", counts[i]))
+                    .size(13.0)
+                    .color(if selected { TEXT } else { MUTED })
+                    .strong();
+                if ui.selectable_label(selected, text).clicked() {
+                    self.results_tab = i;
+                }
+            }
+        });
+
+        let words: Vec<&String> = match self.results_tab {
+            0 => self.game.words.common.iter().collect(),
+            1 => self.game.words.obscure.iter().collect(),
+            _ => self.game.theme_words(),
+        };
+
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical()
+            .id_salt("word_tabs")
+            .max_height(96.0)
+            .show(ui, |ui| {
+                if words.is_empty() {
+                    ui.label(
+                        egui::RichText::new("Nothing in this list for this board.")
+                            .size(12.0)
+                            .color(MUTED),
+                    );
+                    return;
+                }
+                ui.horizontal_wrapped(|ui| {
+                    for word in words.iter().take(300) {
+                        // Found words are picked out; the rest are what you left behind.
+                        let found = self.game.has_found(word);
+                        ui.label(
+                            egui::RichText::new(word.to_uppercase())
+                                .size(13.0)
+                                .color(if found { GREEN } else { MUTED })
+                                .strong(),
+                        );
+                    }
+                });
+            });
+    }
+
     /// The six-strong league table, with your row picked out.
-    fn standings_table(&self, ui: &mut egui::Ui) {
+    fn standings_table(&self, ui: &mut egui::Ui, pad: f32) {
         let season = &self.game.season;
         let played = season.round > 0;
 
         ui.horizontal(|ui| {
-            ui.add_space(60.0);
+            ui.add_space(pad);
             ui.label(egui::RichText::new("LEAGUE TABLE").size(11.0).color(MUTED).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(60.0);
+                ui.add_space(pad);
                 ui.label(egui::RichText::new("TOTAL").size(11.0).color(MUTED).strong());
                 if played {
                     ui.add_space(24.0);
@@ -589,7 +698,7 @@ impl WordLegendApp {
             let name_color = if row.is_you { TEXT } else { MUTED };
 
             ui.horizontal(|ui| {
-                ui.add_space(60.0);
+                ui.add_space(pad);
                 ui.label(egui::RichText::new(format!("{}", row.place)).size(14.0).color(zone).strong());
                 ui.add_space(6.0);
                 ui.label(
@@ -600,7 +709,7 @@ impl WordLegendApp {
                         .background_color(if row.is_you { ACCENT.gamma_multiply(0.30) } else { Color32::TRANSPARENT }),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(60.0);
+                    ui.add_space(pad);
                     ui.label(egui::RichText::new(thousands(row.total as usize)).size(14.0).color(name_color).strong());
                     if played {
                         ui.add_space(24.0);
@@ -640,23 +749,38 @@ impl WordLegendApp {
         ));
         painter.rect_filled(screen, 0.0, BG.gamma_multiply(0.88));
 
+        // Pinned near the top rather than centred: an Area anchored to the centre
+        // only gets the space below its own origin, which capped the scroll area
+        // at ~400px and hid the button under a fold.
+        const MARGIN: f32 = 24.0;
+        let width = 900.0_f32.min(screen.width() - MARGIN * 2.0);
+
         egui::Area::new(egui::Id::new("overlay"))
             .order(egui::Order::Foreground)
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .anchor(Align2::CENTER_TOP, Vec2::new(0.0, MARGIN))
             .show(ctx, |ui| {
-                ui.set_width(600.0);
+                ui.set_width(width);
                 egui::Frame::default()
                     .fill(PANEL)
                     .stroke(Stroke::new(1.0_f32, TILE_EDGE))
                     .corner_radius(18.0)
                     .inner_margin(egui::Margin::same(30))
                     .show(ui, |ui| {
-                        egui::ScrollArea::vertical()
-                            .max_height(screen.height() - 60.0)
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
-                                ui.vertical_centered(|ui| contents(self, ui));
-                            });
+                        // Laid out directly when there is room: a ScrollArea here
+                        // collapses to about 400px regardless of the max height it
+                        // is given, which hid the button under a fold. On a window
+                        // too short for the card -- a phone in landscape, say --
+                        // scrolling beats an unreachable button.
+                        if screen.height() < SHORT_WINDOW {
+                            egui::ScrollArea::vertical()
+                                .id_salt("overlay_scroll")
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    ui.vertical_centered(|ui| contents(self, ui));
+                                });
+                        } else {
+                            ui.vertical_centered(|ui| contents(self, ui));
+                        }
                     });
             });
     }
@@ -733,6 +857,15 @@ impl BoardGeometry {
             }
         }
         out
+    }
+}
+
+/// Blue for a tile no word used, amber for one used once, green for one reused.
+fn tile_use_color(uses: u32) -> Color32 {
+    match uses {
+        0 => BLUE,
+        1 => AMBER,
+        _ => GREEN,
     }
 }
 
@@ -834,15 +967,36 @@ mod tests {
 
     /// Lay out an overlay headlessly at the real window size and report the card's
     /// rect. Two passes: an Area only knows its size after it has been shown once.
-    fn overlay_rect(app: &mut WordLegendApp, draw: fn(&mut WordLegendApp, &egui::Context)) -> Rect {
+    fn overlay_rect_at(
+        app: &mut WordLegendApp,
+        draw: fn(&mut WordLegendApp, &egui::Context),
+        size: Vec2,
+    ) -> Rect {
         let ctx = egui::Context::default();
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 780.0));
+        let screen = Rect::from_min_size(Pos2::ZERO, size);
         for _ in 0..2 {
             let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
             let _ = ctx.run(input, |ctx| draw(app, ctx));
         }
         let state = egui::AreaState::load(&ctx, egui::Id::new("overlay")).expect("overlay shown");
         Rect::from_min_size(state.left_top_pos(), state.size.expect("overlay sized"))
+    }
+
+    fn overlay_rect(app: &mut WordLegendApp, draw: fn(&mut WordLegendApp, &egui::Context)) -> Rect {
+        overlay_rect_at(app, draw, Vec2::new(1000.0, 780.0))
+    }
+
+    /// A scorecard mid-season, which is the tallest thing the game draws.
+    fn app_at_season_end() -> WordLegendApp {
+        let mut app = WordLegendApp::new();
+        for _ in 0..4 {
+            app.game.season.record_round(9_000, 30_000);
+        }
+        app.game.start_round();
+        app.game.time_left = 0.0;
+        app.game.tick(0.2);
+        assert!(app.game.season_outcome.is_some(), "expected a finished season");
+        app
     }
 
     /// The league table made these cards much taller; they must still fit the window.
@@ -854,18 +1008,26 @@ mod tests {
         let ready = overlay_rect(&mut app, |a, ctx| a.overlay_ready(ctx));
         assert!(screen.contains_rect(ready), "start card overflows: {ready:?}");
 
-        // A season-ending round shows the most content: banner, table and all.
-        let mut app = WordLegendApp::new();
-        for _ in 0..4 {
-            app.game.season.record_round(9_000, 30_000);
-        }
-        app.game.start_round();
-        app.game.time_left = 0.0;
-        app.game.tick(0.2);
-        assert!(app.game.season_outcome.is_some(), "expected a finished season");
-
+        // A season-ending round shows the most content: board, stats, table and all.
+        let mut app = app_at_season_end();
         let over = overlay_rect(&mut app, |a, ctx| a.overlay_results(ctx));
         assert!(screen.contains_rect(over), "results card overflows: {over:?}");
+    }
+
+    /// The card must stay on screen when the window is too short to hold it,
+    /// otherwise the button that starts the next round cannot be reached.
+    #[test]
+    fn a_short_window_scrolls_instead_of_overflowing() {
+        for height in [560.0, 640.0, 700.0] {
+            let size = Vec2::new(1000.0, height);
+            let screen = Rect::from_min_size(Pos2::ZERO, size);
+            let mut app = app_at_season_end();
+            let over = overlay_rect_at(&mut app, |a, ctx| a.overlay_results(ctx), size);
+            assert!(
+                screen.contains_rect(over),
+                "results card overflows a {height}px window: {over:?}"
+            );
+        }
     }
 
     fn geom() -> BoardGeometry {
