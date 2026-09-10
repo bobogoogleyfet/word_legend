@@ -82,16 +82,20 @@ Then open <http://localhost:8080>.
 Boggle dice, which give a far better mix than sampling letter frequencies
 independently. Each candidate board is then solved in full — a depth-first walk
 over the 16 tiles, pruned against a prefix trie — and rerolled until it holds at
-least 60 common words with at least four long ones. Generation takes well under
-a millisecond.
+least 60 common words, a few long ones, and no tile stranded outside at least two
+of them. Generation takes well under a millisecond.
 
-**The dictionary has two tiers.** Any of ~364,000 words scores when you trace
-it, so a legitimate find is never rejected. But boards and the end-of-round
-"you missed" list are drawn from a curated ~63,000-word common tier, because the
-full list is padded with obscurities — without the split, the longest words on a
-board came out as things like `usninic` and `isolead`, which makes a scorecard
-read as nonsense. `common.txt` is derived from SCOWL and intersected with
-`dictionary.txt`, so it can never cite a word the game would refuse.
+**The dictionary has two tiers.** The lexicon is ENABLE — 172,823 words, public
+domain, the list Words with Friends was built on — so every word the game accepts
+is a real, playable one. Of those, ~63,000 everyday words form the **Common**
+tier that boards are built from and scored against; the remaining ~109,000 are
+**Obscure**: valid when you trace them, but never held against you on a
+scorecard. `common.txt` is SCOWL intersected with the lexicon, so the two tiers
+can never disagree.
+
+**Every letter earns its place.** A board is rejected unless each of its sixteen
+tiles appears in at least two findable words, so no letter is dead and every one
+can be reused.
 
 ## Layout
 
@@ -140,9 +144,9 @@ cache makes later runs much quicker.
 
 ### A note on size
 
-Both word lists are compiled into the WebAssembly binary, which makes it ~7.8 MB,
-or **~2.5 MB gzipped** — what actually crosses the wire, since Pages compresses
+Both word lists are compiled into the WebAssembly binary, which makes it ~5.5 MB,
+or **~1.9 MB gzipped** — what actually crosses the wire, since Pages compresses
 automatically. That is a slow first load on mobile, which is why the page shows a
 loading bar rather than a blank screen. Dropping the full acceptance list and
-shipping only the common tier would cut it to roughly 0.9 MB gzipped, at the cost
-of rejecting obscure-but-real words.
+shipping only the common tier would cut it further, at the cost of rejecting
+obscure-but-real words.

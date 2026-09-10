@@ -216,9 +216,10 @@ mod tests {
         let common = |w: &str| {
             dict.step_str(dict.root(), w).is_some_and(|n| dict.is_common_node(n))
         };
-        // Accepted when traced, but never shown on a scorecard.
-        assert!(dict.contains("usninic") && !common("usninic"));
-        assert!(dict.contains("aeolist") && !common("aeolist"));
+        // Real words, playable when traced, but not everyday ones: they belong in
+        // the Obscure tier rather than on a Common scorecard.
+        assert!(dict.contains("adit") && !common("adit"));
+        assert!(dict.contains("abye") && !common("abye"));
         assert!(common("herd") && common("quest"));
         assert!(dict.common_count() < dict.word_count());
     }
