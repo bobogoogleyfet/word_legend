@@ -9,6 +9,8 @@
 pub const SAVE: &str = "save";
 /// Best score from before leagues existed, under the game's pre-rename name.
 pub const LEGACY_BEST: &str = "legacy_best";
+/// The account: a random id and a display name.
+pub const IDENTITY: &str = "identity";
 
 #[cfg(all(not(target_arch = "wasm32"), not(test)))]
 mod backend {
@@ -19,6 +21,7 @@ mod backend {
         let file = match slot {
             // The name the game shipped under before it became Word Legend.
             super::LEGACY_BEST => ".wordherd_best",
+            super::IDENTITY => ".word_legend_account",
             _ => ".word_legend_save",
         };
         match std::env::var("HOME") {
