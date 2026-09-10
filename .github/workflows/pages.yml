@@ -23,6 +23,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Also flips the Pages source to "GitHub Actions" if the repo is still set to
+      # publish from a branch, which would serve the repo root instead of dist/.
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - name: Install Rust with the wasm target
         run: rustup target add wasm32-unknown-unknown
 
