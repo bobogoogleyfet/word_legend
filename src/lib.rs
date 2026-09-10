@@ -2,6 +2,7 @@ mod dictionary;
 mod game;
 mod league;
 mod storage;
+mod themes;
 mod ui;
 
 pub use ui::WordLegendApp;

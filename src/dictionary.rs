@@ -20,6 +20,7 @@ pub const MAX_WORD_LEN: usize = 16;
 /// Shipped word lists, so the game runs from any working directory.
 const EMBEDDED_ACCEPTED: &str = include_str!("../dictionary.txt");
 const EMBEDDED_COMMON: &str = include_str!("../common.txt");
+const EMBEDDED_THEMES: &str = include_str!("../themes.txt");
 
 pub type NodeId = u32;
 
@@ -50,6 +51,11 @@ impl Dictionary {
         // embedded copy, so the lists can be swapped without a rebuild.
         dict.load(&Self::read_list("dictionary.txt", EMBEDDED_ACCEPTED), false);
         dict.load(&Self::read_list("common.txt", EMBEDDED_COMMON), true);
+        // Theme words count as ordinary words: a themed board is unplayable if the
+        // very words it was built around are rejected. This is also what puts the
+        // proper nouns -- CUBA, OSLO, TEXAS -- into play, since building common.txt
+        // from SCOWL dropped anything not lowercase.
+        dict.load(&Self::read_list("themes.txt", EMBEDDED_THEMES), true);
 
         dict
     }
