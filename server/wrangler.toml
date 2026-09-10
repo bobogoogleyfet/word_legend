@@ -1,0 +1,28 @@
+# Cloudflare Worker for Word Legend.
+#
+# NOTHING SECRET GOES IN THIS FILE. It is committed. The one secret the Worker
+# needs is set out-of-band and stored by Cloudflare:
+#
+#   npx wrangler secret put SEED_SECRET
+#
+# The KV id below is not a credential -- it names a namespace and grants nothing
+# on its own; only an authenticated account can reach it.
+
+name = "word-legend"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# Fill in after: npx wrangler kv namespace create ROUNDS
+[[kv_namespaces]]
+binding = "ROUNDS"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+[vars]
+# Public knobs only. Secrets never appear here.
+ROUND_SECONDS = "180"
+RESULTS_SECONDS = "60"
+# Rounds cycle through the packs that have been uploaded.
+PACK_COUNT = "10"
+PACK_SIZE = "100"
+# Only these origins may call the API.
+ALLOWED_ORIGINS = "https://bobogoogleyfet.github.io,http://localhost:8080"

@@ -1,0 +1,13 @@
+{
+  "name": "word-legend-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node test.mjs ../rounds/pack-0.json"
+  },
+  "devDependencies": {
+    "wrangler": "^3"
+  }
+}
