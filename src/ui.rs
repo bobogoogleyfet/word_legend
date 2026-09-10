@@ -597,7 +597,7 @@ impl WordLegendApp {
             ("Avg points per word", format!("{:.0}", g.average_points())),
             ("Time per word", format!("{:.1}s", g.seconds_per_word())),
             ("Avg word length", format!("{:.1}", g.average_word_length())),
-            ("Board type", g.board_type().to_string()),
+            ("Board type", g.board_type()),
         ];
 
         for (label, value) in rows {
@@ -619,8 +619,12 @@ impl WordLegendApp {
             self.game.theme_words().len(),
         ];
 
+        // The third tab is named after the board's own category when it has one.
+        let theme_tab = self.game.theme.clone().unwrap_or_else(|| "Theme".to_string());
+        let names = ["Common".to_string(), "Obscure".to_string(), theme_tab];
+
         ui.horizontal(|ui| {
-            for (i, name) in ["Common", "Obscure", "Theme"].into_iter().enumerate() {
+            for (i, name) in names.iter().enumerate() {
                 let selected = self.results_tab == i;
                 let text = egui::RichText::new(format!("{name} ({})", counts[i]))
                     .size(13.0)
@@ -889,13 +893,6 @@ fn ordinal(n: usize) -> String {
         _ => "th",
     };
     format!("{n}{suffix}")
-}
-
-fn stat(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.vertical(|ui| {
-        ui.label(egui::RichText::new(label).size(10.0).color(MUTED).strong());
-        ui.label(egui::RichText::new(value).size(20.0).color(TEXT).strong());
-    });
 }
 
 fn big_button(ui: &mut egui::Ui, label: &str, color: Color32) -> bool {
