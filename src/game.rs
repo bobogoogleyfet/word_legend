@@ -35,6 +35,8 @@ const DICE: [[&str; 6]; 16] = [
 const MIN_SOLUTIONS: usize = 60;
 const MIN_LONG_SOLUTIONS: usize = 4;
 const LONG_WORD_LEN: usize = 6;
+/// The bar for a board-defining "superword".
+pub const SUPERWORD_LEN: usize = 7;
 const MAX_BOARD_ATTEMPTS: usize = 400;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -77,8 +79,10 @@ pub struct Game {
     pub path: Vec<Position>,
     pub found: Vec<FoundWord>,
     found_set: HashSet<String>,
-    /// Every common word hiding on the current board, longest first.
-    pub solutions: Vec<String>,
+    /// Every word hiding on the current board, split by tier.
+    pub words: BoardWords,
+    /// How many times each tile was used across the words you found.
+    pub tile_uses: [[u32; SIZE]; SIZE],
     pub score: u32,
     pub time_left: f32,
     pub phase: Phase,
@@ -99,7 +103,7 @@ pub struct Game {
 impl Game {
     pub fn new() -> Self {
         let dictionary = Dictionary::new();
-        let (grid, solutions) = generate_board(&dictionary);
+        let (grid, words) = generate_board(&dictionary);
         let save = Save::load();
 
         Game {
@@ -108,7 +112,8 @@ impl Game {
             path: Vec::new(),
             found: Vec::new(),
             found_set: HashSet::new(),
-            solutions,
+            words,
+            tile_uses: [[0; SIZE]; SIZE],
             score: 0,
             time_left: ROUND_SECONDS,
             phase: Phase::Ready,
@@ -132,9 +137,10 @@ impl Game {
             self.persist();
         }
 
-        let (grid, solutions) = generate_board(&self.dictionary);
+        let (grid, words) = generate_board(&self.dictionary);
         self.grid = grid;
-        self.solutions = solutions;
+        self.words = words;
+        self.tile_uses = [[0; SIZE]; SIZE];
         self.path.clear();
         self.found.clear();
         self.found_set.clear();
@@ -179,11 +185,6 @@ impl Game {
 
     fn persist(&self) {
         Save::store(self.best_score, &self.season);
-    }
-
-    /// Everything the board is worth if every common word on it is found.
-    pub fn board_par(&self) -> u32 {
-        self.solutions.iter().map(|w| word_points(w.len())).sum()
     }
 
     // --- tracing -----------------------------------------------------------
@@ -265,6 +266,9 @@ impl Game {
 
         let points = word_points(word.len());
         self.score += points;
+        for at in &cells {
+            self.tile_uses[at.row][at.col] += 1;
+        }
         self.found_set.insert(word.clone());
         self.found.push(FoundWord { word: word.clone(), points });
         self.set_feedback(Feedback::Accepted, word, points, cells);
@@ -288,13 +292,96 @@ impl Game {
 
     // --- round summary -----------------------------------------------------
 
+    /// Everything the board was worth: the score if every common word were found.
+    pub fn board_par(&self) -> u32 {
+        self.words.common.iter().map(|w| word_points(w.len())).sum()
+    }
+
+    pub fn found_count(&self) -> usize {
+        self.found.len()
+    }
+
+    /// Denominator for "words found": the common tier, since holding anyone to the
+    /// obscure list would be absurd.
+    pub fn findable_count(&self) -> usize {
+        self.words.common.len()
+    }
+
+    pub fn found_fraction(&self) -> f32 {
+        if self.findable_count() == 0 {
+            return 0.0;
+        }
+        (self.found_count() as f32 / self.findable_count() as f32).min(1.0)
+    }
+
+    pub fn average_points(&self) -> f32 {
+        if self.found.is_empty() {
+            return 0.0;
+        }
+        self.score as f32 / self.found.len() as f32
+    }
+
+    /// Seconds of the round spent per word found.
+    pub fn seconds_per_word(&self) -> f32 {
+        if self.found.is_empty() {
+            return 0.0;
+        }
+        ROUND_SECONDS / self.found.len() as f32
+    }
+
+    pub fn average_word_length(&self) -> f32 {
+        if self.found.is_empty() {
+            return 0.0;
+        }
+        self.found.iter().map(|w| w.word.len()).sum::<usize>() as f32 / self.found.len() as f32
+    }
+
+    /// A word long enough to define the board it sits on.
+    pub fn superwords(&self) -> Vec<&String> {
+        self.words
+            .common
+            .iter()
+            .filter(|w| w.len() >= SUPERWORD_LEN)
+            .collect()
+    }
+
+    /// PLACEHOLDER. Real themes need categorised word lists, which the game does
+    /// not ship yet; until then the Theme tab shows the board's superwords.
+    pub fn theme_words(&self) -> Vec<&String> {
+        self.superwords()
+    }
+
+    /// What kind of board this is, read off its own solution set rather than any
+    /// authored theme.
+    pub fn board_type(&self) -> &'static str {
+        let longest = self.words.common.first().map(|w| w.len()).unwrap_or(0);
+        let count = self.words.common.len();
+
+        if longest >= SUPERWORD_LEN + 1 {
+            "Superword"
+        } else if longest >= SUPERWORD_LEN {
+            "Long"
+        } else if count >= 120 {
+            "Dense"
+        } else if count < 70 {
+            "Sparse"
+        } else {
+            "Standard"
+        }
+    }
+
+    pub fn has_found(&self, word: &str) -> bool {
+        self.found_set.contains(word)
+    }
+
     pub fn longest_found(&self) -> Option<&FoundWord> {
         self.found.iter().max_by_key(|w| w.word.len())
     }
 
-    /// Words on the board the player never traced, longest first.
+    /// Common words on the board the player never traced, longest first.
     pub fn missed_words(&self, limit: usize) -> Vec<&String> {
-        self.solutions
+        self.words
+            .common
             .iter()
             .filter(|w| !self.found_set.contains(*w))
             .take(limit)
@@ -342,27 +429,27 @@ pub fn is_adjacent(a: Position, b: Position) -> bool {
 
 /// Roll boards until one is rich enough to play, keeping the best seen so far so
 /// this always terminates with something reasonable.
-fn generate_board(dict: &Dictionary) -> ([[Cell; SIZE]; SIZE], Vec<String>) {
+fn generate_board(dict: &Dictionary) -> ([[Cell; SIZE]; SIZE], BoardWords) {
     let mut rng = rand::thread_rng();
-    let mut best: Option<([[Cell; SIZE]; SIZE], Vec<String>, usize)> = None;
+    let mut best: Option<([[Cell; SIZE]; SIZE], BoardWords, usize)> = None;
 
     for _ in 0..MAX_BOARD_ATTEMPTS {
         let grid = roll_dice(&mut rng);
-        let solutions = solve_board(dict, &grid);
-        let long = solutions.iter().filter(|w| w.len() >= LONG_WORD_LEN).count();
+        let words = solve_board(dict, &grid);
+        let long = words.common.iter().filter(|w| w.len() >= LONG_WORD_LEN).count();
 
-        if solutions.len() >= MIN_SOLUTIONS && long >= MIN_LONG_SOLUTIONS {
-            return (grid, solutions);
+        if words.common.len() >= MIN_SOLUTIONS && long >= MIN_LONG_SOLUTIONS {
+            return (grid, words);
         }
 
-        let quality = solutions.len() + long * 10;
+        let quality = words.common.len() + long * 10;
         if best.as_ref().is_none_or(|(_, _, q)| quality > *q) {
-            best = Some((grid, solutions, quality));
+            best = Some((grid, words, quality));
         }
     }
 
-    let (grid, solutions, _) = best.expect("at least one board was rolled");
-    (grid, solutions)
+    let (grid, words, _) = best.expect("at least one board was rolled");
+    (grid, words)
 }
 
 fn roll_dice(rng: &mut impl Rng) -> [[Cell; SIZE]; SIZE] {
@@ -377,21 +464,33 @@ fn roll_dice(rng: &mut impl Rng) -> [[Cell; SIZE]; SIZE] {
     })
 }
 
-/// Every common word reachable by tracing adjacent tiles, returned longest first.
-/// Obscure words are still accepted in play -- they just don't appear here.
-pub fn solve_board(dict: &Dictionary, grid: &[[Cell; SIZE]; SIZE]) -> Vec<String> {
-    let mut found = HashSet::new();
+/// Everything hiding on a board, split by tier.
+#[derive(Default, Clone)]
+pub struct BoardWords {
+    /// Ordinary words: what the board is scored and judged against.
+    pub common: Vec<String>,
+    /// Accepted when traced, but too obscure to hold anyone to.
+    pub obscure: Vec<String>,
+}
+
+/// Every word reachable by tracing adjacent tiles, each list longest first.
+pub fn solve_board(dict: &Dictionary, grid: &[[Cell; SIZE]; SIZE]) -> BoardWords {
+    let mut common = HashSet::new();
+    let mut obscure = HashSet::new();
     let mut word = String::new();
 
     for row in 0..SIZE {
         for col in 0..SIZE {
-            walk(dict, grid, row, col, 0, dict.root(), &mut word, &mut found);
+            walk(dict, grid, row, col, 0, dict.root(), &mut word, &mut common, &mut obscure);
         }
     }
 
-    let mut words: Vec<String> = found.into_iter().collect();
-    words.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
-    words
+    let sorted = |set: HashSet<String>| {
+        let mut v: Vec<String> = set.into_iter().collect();
+        v.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        v
+    };
+    BoardWords { common: sorted(common), obscure: sorted(obscure) }
 }
 
 fn walk(
@@ -402,7 +501,8 @@ fn walk(
     visited: u16,
     node: u32,
     word: &mut String,
-    found: &mut HashSet<String>,
+    common: &mut HashSet<String>,
+    obscure: &mut HashSet<String>,
 ) {
     let bit = 1u16 << (row * SIZE + col);
     if visited & bit != 0 {
@@ -417,10 +517,14 @@ fn walk(
     word.push_str(letters);
     let visited = visited | bit;
 
-    // Only the curated tier counts as a "word on the board": the board gate and
-    // the end-of-round scorecard both read this, and neither should cite junk.
-    if word.len() >= MIN_WORD_LEN && dict.is_common_node(node) {
-        found.insert(word.clone());
+    if word.len() >= MIN_WORD_LEN && dict.is_word_node(node) {
+        // The tier decides which list it lands in: the board gate and the headline
+        // scorecard read `common`, so neither ever cites junk.
+        if dict.is_common_node(node) {
+            common.insert(word.clone());
+        } else {
+            obscure.insert(word.clone());
+        }
     }
 
     if !dict.is_dead_end(node) {
@@ -434,7 +538,7 @@ fn walk(
                 if r < 0 || c < 0 || r >= SIZE as i32 || c >= SIZE as i32 {
                     continue;
                 }
-                walk(dict, grid, r as usize, c as usize, visited, node, word, found);
+                walk(dict, grid, r as usize, c as usize, visited, node, word, common, obscure);
             }
         }
     }
@@ -473,12 +577,15 @@ mod tests {
         let dict = Dictionary::new();
 
         let common = board(["wars", "zzzz", "zzzz", "zzzz"]);
-        assert!(solve_board(&dict, &common).iter().any(|w| w == "wars"));
+        assert!(solve_board(&dict, &common).common.iter().any(|w| w == "wars"));
 
-        // "abac" is accepted when traced, but is not scorecard material.
-        let obscure = board(["abac", "zzzz", "zzzz", "zzzz"]);
+        // "abac" is accepted when traced, but is not scorecard material: it belongs
+        // in the obscure list, not the common one.
+        let grid = board(["abac", "zzzz", "zzzz", "zzzz"]);
+        let words = solve_board(&dict, &grid);
         assert!(dict.contains("abac"));
-        assert!(!solve_board(&dict, &obscure).iter().any(|w| w == "abac"));
+        assert!(!words.common.iter().any(|w| w == "abac"));
+        assert!(words.obscure.iter().any(|w| w == "abac"));
     }
 
     #[test]
@@ -486,7 +593,7 @@ mod tests {
         let dict = Dictionary::new();
         // "herd" traces across the top row; "hero" would need a non-adjacent jump.
         let grid = board(["herd", "zzzz", "zzzo", "zzzz"]);
-        let words = solve_board(&dict, &grid);
+        let words = solve_board(&dict, &grid).common;
         assert!(words.iter().any(|w| w == "herd"));
         assert!(!words.iter().any(|w| w == "hero"));
     }
@@ -495,15 +602,103 @@ mod tests {
     fn solver_returns_longest_first() {
         let dict = Dictionary::new();
         let grid = board(["herd", "zzzz", "zzzz", "zzzz"]);
-        let words = solve_board(&dict, &grid);
+        let words = solve_board(&dict, &grid).common;
         assert!(words.windows(2).all(|w| w[0].len() >= w[1].len()));
     }
 
     #[test]
     fn generated_boards_are_word_rich() {
         let dict = Dictionary::new();
-        let (_, solutions) = generate_board(&dict);
-        assert!(solutions.len() >= MIN_SOLUTIONS, "got {} words", solutions.len());
+        let (_, words) = generate_board(&dict);
+        assert!(words.common.len() >= MIN_SOLUTIONS, "got {} words", words.common.len());
+    }
+
+    #[test]
+    fn tile_use_is_counted_per_letter() {
+        let mut game = Game::new();
+        game.grid = board(["herd", "zzzz", "zzzz", "zzzz"]);
+        game.words = solve_board(&game.dictionary, &game.grid);
+        game.tile_uses = [[0; SIZE]; SIZE];
+        game.phase = Phase::Playing;
+
+        for (row, col) in [(0, 0), (0, 1), (0, 2), (0, 3)] {
+            game.extend_path(Position { row, col });
+        }
+        game.submit_path();
+
+        // The four letters of "herd" were each used once; nothing else was touched.
+        assert_eq!(game.tile_uses[0], [1, 1, 1, 1]);
+        assert_eq!(game.tile_uses[1], [0, 0, 0, 0]);
+
+        // "her" reuses three of them.
+        for (row, col) in [(0, 0), (0, 1), (0, 2)] {
+            game.extend_path(Position { row, col });
+        }
+        game.submit_path();
+        assert_eq!(game.tile_uses[0], [2, 2, 2, 1]);
+    }
+
+    #[test]
+    fn a_rejected_word_leaves_tile_use_alone() {
+        let mut game = Game::new();
+        game.grid = board(["zqxj", "zzzz", "zzzz", "zzzz"]);
+        game.words = solve_board(&game.dictionary, &game.grid);
+        game.tile_uses = [[0; SIZE]; SIZE];
+        game.phase = Phase::Playing;
+
+        for (row, col) in [(0, 0), (0, 1), (0, 2)] {
+            game.extend_path(Position { row, col });
+        }
+        game.submit_path();
+
+        assert_eq!(game.feedback, Feedback::NotAWord);
+        assert_eq!(game.tile_uses[0], [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn round_statistics_describe_the_round() {
+        let mut game = Game::new();
+        game.grid = board(["herd", "zzzz", "zzzz", "zzzz"]);
+        game.words = solve_board(&game.dictionary, &game.grid);
+        game.phase = Phase::Playing;
+
+        for (row, col) in [(0, 0), (0, 1), (0, 2), (0, 3)] {
+            game.extend_path(Position { row, col });
+        }
+        game.submit_path();
+
+        assert_eq!(game.found_count(), 1);
+        assert_eq!(game.average_points(), word_points(4) as f32);
+        assert_eq!(game.average_word_length(), 4.0);
+        assert_eq!(game.seconds_per_word(), ROUND_SECONDS);
+        assert!(game.board_par() >= game.score);
+        assert!(game.found_fraction() > 0.0 && game.found_fraction() <= 1.0);
+    }
+
+    #[test]
+    fn statistics_are_safe_on_a_blank_round() {
+        // Every one of these divides by the word count.
+        let game = Game::new();
+        assert_eq!(game.found_count(), 0);
+        assert_eq!(game.average_points(), 0.0);
+        assert_eq!(game.seconds_per_word(), 0.0);
+        assert_eq!(game.average_word_length(), 0.0);
+        assert_eq!(game.found_fraction(), 0.0);
+    }
+
+    #[test]
+    fn a_long_word_makes_it_a_superword_board() {
+        let dict = Dictionary::new();
+        let mut game = Game::new();
+        game.dictionary = dict;
+        // "stranger" traces along the top row and back: eight letters.
+        game.grid = board(["stra", "zzzn", "zzzg", "zreg"]);
+        game.words = solve_board(&game.dictionary, &game.grid);
+
+        let longest = game.words.common.first().map(|w| w.len()).unwrap_or(0);
+        let expected = if longest >= SUPERWORD_LEN + 1 { "Superword" } else if longest >= SUPERWORD_LEN { "Long" } else { game.board_type() };
+        assert_eq!(game.board_type(), expected);
+        assert!(game.superwords().iter().all(|w| w.len() >= SUPERWORD_LEN));
     }
 
     #[test]
