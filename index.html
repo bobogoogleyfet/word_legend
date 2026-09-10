@@ -57,25 +57,41 @@
   </div>
 
   <script type="module">
-    import init, { start } from './word_legend_app.js';
-
     const status = document.getElementById('status');
     const canvas = document.getElementById('canvas');
 
-    function fail(err) {
+    function fail(message, err) {
       console.error(err);
       status.className = 'failed';
-      status.innerHTML =
-        '<h1>WORD LEGEND</h1><p>This game needs a browser with WebGL2 and WebAssembly. ' +
-        'Check the console for details.</p>';
+      status.innerHTML = '<h1>WORD LEGEND</h1><p>' + message + '</p>';
+    }
+
+    // Imported dynamically, not with a top-level `import`: a static one that 404s
+    // takes the whole module down before any of this runs, leaving the loading bar
+    // spinning forever with the reason only in the console.
+    let wasm;
+    try {
+      wasm = await import('./word_legend_app.js');
+    } catch (err) {
+      fail(
+        'The game bundle failed to load. If this is a GitHub Pages deploy, check ' +
+        'that Pages is publishing the built <code>dist/</code> from the Actions ' +
+        'workflow rather than the repository root.',
+        err,
+      );
+      throw err;
     }
 
     try {
-      await init();
+      await wasm.default();
       status.remove();
-      await start(canvas);
+      await wasm.start(canvas);
     } catch (err) {
-      fail(err);
+      fail(
+        'This game needs a browser with WebAssembly and WebGL2. Check the console ' +
+        'for details.',
+        err,
+      );
     }
   </script>
 </body>
