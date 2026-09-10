@@ -1,0 +1,35 @@
+[package]
+name = "word_legend"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+# Distinct from the binary's name, or both targets write the same word_legend.wasm.
+name = "word_legend_app"
+# cdylib for the wasm build, rlib so the desktop binary can link the same code.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+eframe = "0.31"
+egui = "0.31"
+rand = "0.8"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+wasm-bindgen = "0.2"
+# An async #[wasm_bindgen] entry point expands into this crate.
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Storage", "Window", "HtmlCanvasElement"] }
+# rand needs an explicit browser entropy source on wasm, or it fails to link.
+getrandom = { version = "0.2", features = ["js"] }
+
+[profile.dev]
+# The board solver runs a few hundred times at round start; unoptimised it stalls.
+opt-level = 1
+
+[profile.release]
+# The word lists are baked into the wasm, so size is worth paying for.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
