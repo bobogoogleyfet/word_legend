@@ -1,6 +1,7 @@
 //! egui front end: the board, the clock, and the round-end scorecard.
 
 use crate::game::{Feedback, Game, Phase, Position, ROUND_SECONDS, SIZE};
+use crate::identity::{self, Identity};
 use crate::league::{Movement, FORM_GAMES, LEAGUES, MIN_GAMES_TO_MOVE};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
@@ -17,6 +18,27 @@ const AMBER: Color32 = Color32::from_rgb(0xff, 0xb4, 0x54);
 const GOLD: Color32 = Color32::from_rgb(0xff, 0xd1, 0x66);
 const BLUE: Color32 = Color32::from_rgb(0x5b, 0x8c, 0xff);
 
+/// First-run screen state, kept out of the app struct's main body.
+struct Signup {
+    pending: Option<Identity>,
+    name: String,
+    code: String,
+    restoring: bool,
+    copied: bool,
+}
+
+impl Signup {
+    fn new(_fresh: bool) -> Self {
+        Signup {
+            pending: None,
+            name: String::new(),
+            code: String::new(),
+            restoring: false,
+            copied: false,
+        }
+    }
+}
+
 /// Below this window height the results card cannot fit and has to scroll.
 const SHORT_WINDOW: f32 = 720.0;
 
@@ -25,6 +47,10 @@ const PANIC_TIME: f32 = 15.0;
 
 pub struct WordLegendApp {
     game: Game,
+    /// The account. Absent until the first-run screen has been through.
+    identity: Option<Identity>,
+    /// First-run screen state.
+    signup: Signup,
     /// Which of the Common / Obscure / Theme tabs the scorecard is showing.
     results_tab: usize,
     /// Where the cursor was last frame, so a drag can be traced as a segment
@@ -36,8 +62,11 @@ pub struct WordLegendApp {
 
 impl WordLegendApp {
     pub fn new() -> Self {
+        let identity = Identity::load();
         Self {
             game: Game::new(),
+            signup: Signup::new(identity.is_none()),
+            identity,
             results_tab: 0,
             drag_from: None,
             elapsed: 0.0,
@@ -77,6 +106,12 @@ impl eframe::App for WordLegendApp {
             .frame(egui::Frame::default().fill(BG).inner_margin(egui::Margin::same(16)))
             .show(ctx, |ui| self.board_area(ui));
 
+        if self.needs_signup() {
+            self.overlay_signup(ctx);
+            ctx.request_repaint();
+            return;
+        }
+
         match self.game.phase {
             Phase::Ready => self.overlay_ready(ctx),
             Phase::Over => self.overlay_results(ctx),
@@ -91,6 +126,168 @@ impl eframe::App for WordLegendApp {
 }
 
 impl WordLegendApp {
+    fn needs_signup(&self) -> bool {
+        self.identity.as_ref().map(|i| i.name.is_empty()).unwrap_or(true)
+    }
+
+    /// First run: hand over the recovery code, take a display name.
+    fn overlay_signup(&mut self, ctx: &egui::Context) {
+        self.overlay(ctx, |app, ui| {
+            let pending = app.signup.pending.get_or_insert_with(Identity::generate).clone();
+
+            ui.label(egui::RichText::new("WORD LEGEND").size(38.0).color(TEXT).strong());
+            ui.label(
+                egui::RichText::new("No email, no password. Just a code and a name.")
+                    .size(13.0)
+                    .color(MUTED),
+            );
+            ui.add_space(20.0);
+
+            if app.signup.restoring {
+                app.signup_restore(ui);
+            } else {
+                app.signup_new(ui, &pending);
+            }
+        });
+    }
+
+    fn signup_new(&mut self, ui: &mut egui::Ui, pending: &Identity) {
+        ui.label(egui::RichText::new("YOUR RECOVERY CODE").size(11.0).color(MUTED).strong());
+        ui.add_space(6.0);
+
+        // The code is the account. Make it impossible to miss.
+        let code = pending.recovery_code();
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(420.0, 56.0), Sense::hover());
+        let painter = ui.painter();
+        painter.rect_filled(rect, 10.0, TILE);
+        painter.rect_stroke(rect, 10.0, Stroke::new(2.0_f32, GOLD), egui::StrokeKind::Inside);
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            &code,
+            FontId::monospace(26.0),
+            GOLD,
+        );
+
+        ui.add_space(10.0);
+        ui.label(
+            egui::RichText::new("Write this down now.")
+                .size(14.0)
+                .color(AMBER)
+                .strong(),
+        );
+        ui.label(
+            egui::RichText::new(
+                "It is the only way back into this account, on this device or any other.                  Nobody can recover it for you, because nothing else about you is stored.",
+            )
+            .size(12.0)
+            .color(MUTED),
+        );
+
+        ui.add_space(8.0);
+        if ui.button(egui::RichText::new("Copy code").size(12.0)).clicked() {
+            ui.ctx().copy_text(code.clone());
+            self.signup.copied = true;
+        }
+        if self.signup.copied {
+            ui.label(egui::RichText::new("Copied to clipboard").size(11.0).color(GREEN));
+        }
+
+        ui.add_space(18.0);
+        ui.label(egui::RichText::new("DISPLAY NAME").size(11.0).color(MUTED).strong());
+        ui.label(
+            egui::RichText::new("Shown on the leaderboard. Must be unique.")
+                .size(11.0)
+                .color(MUTED),
+        );
+        ui.add_space(4.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut self.signup.name)
+                .desired_width(280.0)
+                .hint_text("pick a name"),
+        );
+
+        let checked = identity::check_name(&self.signup.name);
+        if let Err(problem) = &checked {
+            if !self.signup.name.trim().is_empty() {
+                ui.label(egui::RichText::new(problem.message()).size(11.0).color(RED));
+            }
+        }
+
+        ui.add_space(14.0);
+        if let Ok(name) = checked {
+            if big_button(ui, "START PLAYING", ACCENT) {
+                let me = Identity { id: pending.id.clone(), name };
+                me.store();
+                self.identity = Some(me);
+            }
+        } else {
+            ui.add_enabled(
+                false,
+                egui::Button::new(egui::RichText::new("START PLAYING").size(17.0)),
+            );
+        }
+
+        ui.add_space(10.0);
+        if ui
+            .link(egui::RichText::new("I already have a code").size(12.0).color(ACCENT))
+            .clicked()
+        {
+            self.signup.restoring = true;
+        }
+    }
+
+    fn signup_restore(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("ENTER YOUR CODE").size(11.0).color(MUTED).strong());
+        ui.add_space(6.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut self.signup.code)
+                .desired_width(320.0)
+                .font(egui::TextStyle::Monospace)
+                .hint_text("XXXX-XXXX-XXXX-XXXX"),
+        );
+
+        let parsed = Identity::from_recovery(&self.signup.code);
+        if parsed.is_none() && !self.signup.code.trim().is_empty() {
+            ui.label(
+                egui::RichText::new("That is not a valid code").size(11.0).color(RED),
+            );
+        }
+
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new("DISPLAY NAME").size(11.0).color(MUTED).strong());
+        ui.add(
+            egui::TextEdit::singleline(&mut self.signup.name)
+                .desired_width(280.0)
+                .hint_text("pick a name"),
+        );
+
+        ui.add_space(14.0);
+        match (parsed, identity::check_name(&self.signup.name)) {
+            (Some(found), Ok(name)) => {
+                if big_button(ui, "RESTORE ACCOUNT", ACCENT) {
+                    let me = Identity { id: found.id, name };
+                    me.store();
+                    self.identity = Some(me);
+                }
+            }
+            _ => {
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(egui::RichText::new("RESTORE ACCOUNT").size(17.0)),
+                );
+            }
+        }
+
+        ui.add_space(10.0);
+        if ui
+            .link(egui::RichText::new("Start a new account instead").size(12.0).color(ACCENT))
+            .clicked()
+        {
+            self.signup.restoring = false;
+        }
+    }
+
     fn handle_keys(&mut self, ctx: &egui::Context) {
         let (enter, escape, space) = ctx.input(|i| {
             (
@@ -1031,6 +1228,27 @@ mod tests {
         let mut app = app_after_round();
         let over = overlay_rect(&mut app, |a, ctx| a.overlay_results(ctx));
         assert!(screen.contains_rect(over), "results card overflows: {over:?}");
+    }
+
+    #[test]
+    fn the_signup_card_fits_and_gates_play() {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 780.0));
+        let mut app = WordLegendApp::new();
+        // With no stored account, the first-run screen must come up.
+        assert!(app.needs_signup(), "a fresh install should ask for an account");
+
+        let card = overlay_rect(&mut app, |a, ctx| a.overlay_signup(ctx));
+        assert!(screen.contains_rect(card), "signup card overflows: {card:?}");
+
+        // A code is minted once and held steady, not regenerated every frame.
+        let first = app.signup.pending.clone().expect("a code should have been minted");
+        overlay_rect(&mut app, |a, ctx| a.overlay_signup(ctx));
+        assert_eq!(app.signup.pending.as_ref().unwrap().id, first.id, "the code changed under the player");
+
+        // Naming the account is what finishes signup.
+        let me = Identity { id: first.id, name: "tanner".into() };
+        app.identity = Some(me);
+        assert!(!app.needs_signup());
     }
 
     /// The card must stay on screen when the window is too short to hold it,

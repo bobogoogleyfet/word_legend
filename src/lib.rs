@@ -1,5 +1,6 @@
 mod dictionary;
 mod game;
+mod identity;
 mod league;
 mod storage;
 mod themes;
