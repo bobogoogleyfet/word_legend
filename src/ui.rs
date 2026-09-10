@@ -1,7 +1,7 @@
 //! egui front end: the board, the clock, and the round-end scorecard.
 
 use crate::game::{Feedback, Game, Phase, Position, ROUND_SECONDS, SIZE};
-use crate::league::{Movement, LEAGUES, SEASON_ROUNDS};
+use crate::league::{Movement, FORM_GAMES, LEAGUES, MIN_GAMES_TO_MOVE};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
 const BG: Color32 = Color32::from_rgb(0x12, 0x14, 0x1c);
@@ -84,7 +84,7 @@ impl eframe::App for WordLegendApp {
         }
 
         // The clock and the word animations both need a live frame rate.
-        if self.game.phase == Phase::Playing || self.game.feedback_timer > 0.0 {
+        if matches!(self.game.phase, Phase::Playing | Phase::Over) || self.game.feedback_timer > 0.0 {
             ctx.request_repaint();
         }
     }
@@ -132,22 +132,18 @@ impl WordLegendApp {
 
             ui.add_space(24.0);
 
-            let season = &self.game.season;
+            let rank = &self.game.ranking;
             ui.vertical(|ui| {
                 ui.label(
-                    egui::RichText::new(LEAGUES[season.league].name.to_uppercase())
+                    egui::RichText::new(LEAGUES[rank.league].name.to_uppercase())
                         .size(15.0)
-                        .color(league_color(season.league))
+                        .color(league_color(rank.league))
                         .strong(),
                 );
                 ui.label(
-                    egui::RichText::new(format!(
-                        "Round {} of {}",
-                        season.round_number(),
-                        SEASON_ROUNDS
-                    ))
-                    .size(11.0)
-                    .color(MUTED),
+                    egui::RichText::new(format!("Rank {} avg", thousands(rank.average() as usize)))
+                        .size(11.0)
+                        .color(MUTED),
                 );
             });
 
@@ -198,7 +194,7 @@ impl WordLegendApp {
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new("BEST").size(10.0).color(MUTED));
                 ui.label(
-                    egui::RichText::new(format!("{}", self.game.best_score))
+                    egui::RichText::new(format!("{}", self.game.best_score()))
                         .size(15.0)
                         .color(GOLD)
                         .strong(),
@@ -453,25 +449,28 @@ impl WordLegendApp {
         self.overlay(ctx, |app, ui| {
             ui.label(egui::RichText::new("WORD LEGEND").size(46.0).color(TEXT).strong());
             ui.label(
-                egui::RichText::new(format!(
-                    "{} League · Round {} of {}",
-                    LEAGUES[app.game.season.league].name,
-                    app.game.season.round_number(),
-                    SEASON_ROUNDS
-                ))
-                .size(16.0)
-                .color(league_color(app.game.season.league))
-                .strong(),
+                egui::RichText::new(format!("{} League", LEAGUES[app.game.ranking.league].name))
+                    .size(16.0)
+                    .color(league_color(app.game.ranking.league))
+                    .strong(),
             );
             ui.add_space(4.0);
             ui.label(
-                egui::RichText::new("Two minutes a round. Top two promote, bottom two drop.")
-                    .size(13.0)
-                    .color(MUTED),
+                egui::RichText::new(format!(
+                    "Three minutes a round. Your rank is your average over the last {FORM_GAMES}."
+                ))
+                .size(13.0)
+                .color(MUTED),
             );
 
             ui.add_space(18.0);
-            app.standings_table(ui, 60.0);
+            ui.horizontal(|ui| {
+                ui.add_space(60.0);
+                ui.vertical(|ui| {
+                    ui.set_width(340.0);
+                    app.form_panel(ui);
+                });
+            });
             ui.add_space(16.0);
 
             for line in [
@@ -505,7 +504,12 @@ impl WordLegendApp {
         self.overlay(ctx, |app, ui| {
             ui.label(egui::RichText::new("TIME'S UP").size(15.0).color(MUTED).strong());
             ui.label(egui::RichText::new(format!("{}", app.game.score)).size(46.0).color(GOLD).strong());
-            ui.label(egui::RichText::new(app.game.rank()).size(20.0).color(ACCENT).strong());
+            ui.label(
+                egui::RichText::new(LEAGUES[app.game.ranking.league].name.to_uppercase())
+                    .size(20.0)
+                    .color(league_color(app.game.ranking.league))
+                    .strong(),
+            );
 
             if app.game.is_new_best() {
                 ui.label(egui::RichText::new("\u{2605} NEW PERSONAL BEST").size(14.0).color(GOLD).strong());
@@ -528,19 +532,26 @@ impl WordLegendApp {
                 ui.add_space(16.0);
                 ui.vertical(|ui| {
                     ui.set_width(300.0);
-                    app.standings_table(ui, 0.0);
+                    app.form_panel(ui);
                 });
             });
 
             ui.add_space(12.0);
-            app.season_banner(ui);
+            app.rank_banner(ui);
             app.word_tabs(ui);
 
             ui.add_space(18.0);
-            let label = if app.game.season_outcome.is_some() { "NEW SEASON" } else { "NEXT ROUND" };
-            if big_button(ui, label, ACCENT) {
+            if big_button(ui, "NEXT ROUND", ACCENT) {
                 app.game.start_round();
             }
+            ui.add_space(6.0);
+            // The scorecard is a shared window: everyone moves on together.
+            let left = app.game.results_left.max(0.0);
+            ui.label(
+                egui::RichText::new(format!("Next round in {}s", left.ceil() as u32))
+                    .size(12.0)
+                    .color(if left <= 10.0 { AMBER } else { MUTED }),
+            );
         });
     }
 
@@ -670,78 +681,100 @@ impl WordLegendApp {
             });
     }
 
-    /// The six-strong league table, with your row picked out.
-    fn standings_table(&self, ui: &mut egui::Ui, pad: f32) {
-        let season = &self.game.season;
-        let played = season.round > 0;
+    /// Your last ten rounds, the average they make, and how far that is from the
+    /// next league.
+    fn form_panel(&self, ui: &mut egui::Ui) {
+        let rank = &self.game.ranking;
 
         ui.horizontal(|ui| {
-            ui.add_space(pad);
-            ui.label(egui::RichText::new("LEAGUE TABLE").size(11.0).color(MUTED).strong());
+            ui.label(egui::RichText::new("RANK").size(11.0).color(MUTED).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(pad);
-                ui.label(egui::RichText::new("TOTAL").size(11.0).color(MUTED).strong());
-                if played {
-                    ui.add_space(24.0);
-                    ui.label(egui::RichText::new("LAST").size(11.0).color(MUTED).strong());
-                }
+                ui.label(
+                    egui::RichText::new(format!("last {} rounds", FORM_GAMES))
+                        .size(10.0)
+                        .color(MUTED),
+                );
             });
         });
-        ui.add_space(4.0);
 
-        let table_size = season.rivals.len() + 1;
-        for row in season.standings() {
-            // Show the promotion and relegation cut lines the way a real table does.
-            let zone = if row.place <= 2 {
-                GREEN
-            } else if row.place > table_size - 2 {
-                RED
-            } else {
-                MUTED
-            };
-            let name_color = if row.is_you { TEXT } else { MUTED };
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(thousands(rank.average() as usize))
+                    .size(28.0)
+                    .color(TEXT)
+                    .strong(),
+            );
+            ui.label(egui::RichText::new("avg").size(12.0).color(MUTED));
+        });
 
-            ui.horizontal(|ui| {
-                ui.add_space(pad);
-                ui.label(egui::RichText::new(format!("{}", row.place)).size(14.0).color(zone).strong());
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(&row.name)
-                        .size(14.0)
-                        .color(name_color)
-                        .strong()
-                        .background_color(if row.is_you { ACCENT.gamma_multiply(0.30) } else { Color32::TRANSPARENT }),
+        // Recent rounds as bars, newest on the right.
+        let peak = rank.recent.iter().copied().max().unwrap_or(1).max(1);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());
+        let painter = ui.painter();
+        let slot = rect.width() / FORM_GAMES as f32;
+        for (i, score) in rank.recent.iter().enumerate() {
+            let height = (*score as f32 / peak as f32) * rect.height();
+            let bar = Rect::from_min_size(
+                Pos2::new(rect.min.x + i as f32 * slot, rect.max.y - height.max(2.0)),
+                Vec2::new((slot - 3.0).max(2.0), height.max(2.0)),
+            );
+            painter.rect_filled(bar, 2.0, league_color(rank.league).gamma_multiply(0.8));
+        }
+
+        ui.add_space(6.0);
+
+        match rank.next_threshold() {
+            Some(next) => {
+                let (bar, _) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 8.0), Sense::hover());
+                let painter = ui.painter();
+                painter.rect_filled(bar, 4.0, TILE);
+                let filled = Rect::from_min_size(
+                    bar.min,
+                    Vec2::new(bar.width() * rank.progress(), bar.height()),
                 );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(pad);
-                    ui.label(egui::RichText::new(thousands(row.total as usize)).size(14.0).color(name_color).strong());
-                    if played {
-                        ui.add_space(24.0);
-                        ui.label(egui::RichText::new(thousands(row.last as usize)).size(12.0).color(MUTED));
-                    }
-                });
-            });
+                painter.rect_filled(filled, 4.0, league_color(rank.league + 1));
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} to reach {}",
+                        thousands(next.saturating_sub(rank.average()) as usize),
+                        LEAGUES[rank.league + 1].name
+                    ))
+                    .size(11.0)
+                    .color(MUTED),
+                );
+            }
+            None => {
+                ui.label(
+                    egui::RichText::new("Top of the ladder").size(11.0).color(GOLD).strong(),
+                );
+            }
+        }
+
+        if rank.games_on_record() < MIN_GAMES_TO_MOVE {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} more rounds before the ladder moves",
+                    MIN_GAMES_TO_MOVE - rank.games_on_record()
+                ))
+                .size(11.0)
+                .color(AMBER),
+            );
         }
     }
 
-    /// Promotion or relegation, shown only on the round that ends a season.
-    fn season_banner(&self, ui: &mut egui::Ui) {
-        let Some(outcome) = self.game.season_outcome else { return };
-        let color = match outcome.movement {
+    /// Shown only on a round that actually moved you up or down.
+    fn rank_banner(&self, ui: &mut egui::Ui) {
+        let Some(change) = self.game.rank_change else { return };
+        let color = match change.movement {
             Movement::Promoted => GREEN,
             Movement::Relegated => RED,
-            Movement::Held if outcome.defended() => GOLD,
-            Movement::Held => MUTED,
+            Movement::Held => return,
         };
-
-        ui.label(
-            egui::RichText::new(format!("SEASON OVER · {} PLACE", ordinal(outcome.place)))
-                .size(11.0)
-                .color(MUTED)
-                .strong(),
-        );
-        ui.label(egui::RichText::new(outcome.headline()).size(24.0).color(color).strong());
-        ui.add_space(10.0);
+        ui.label(egui::RichText::new(change.headline()).size(22.0).color(color).strong());
+        ui.add_space(8.0);
     }
 
     /// Dim everything and centre a card on top of it.
@@ -884,17 +917,6 @@ fn league_color(league: usize) -> Color32 {
     }
 }
 
-fn ordinal(n: usize) -> String {
-    let suffix = match (n % 10, n % 100) {
-        (_, 11..=13) => "th",
-        (1, _) => "st",
-        (2, _) => "nd",
-        (3, _) => "rd",
-        _ => "th",
-    };
-    format!("{n}{suffix}")
-}
-
 fn big_button(ui: &mut egui::Ui, label: &str, color: Color32) -> bool {
     ui.add_sized(
         [240.0, 48.0],
@@ -983,16 +1005,16 @@ mod tests {
         overlay_rect_at(app, draw, Vec2::new(1000.0, 780.0))
     }
 
-    /// A scorecard mid-season, which is the tallest thing the game draws.
-    fn app_at_season_end() -> WordLegendApp {
+    /// A finished round showing a rank change, which is the tallest scorecard.
+    fn app_after_round() -> WordLegendApp {
         let mut app = WordLegendApp::new();
-        for _ in 0..4 {
-            app.game.season.record_round(9_000, 30_000);
+        for _ in 0..crate::league::MIN_GAMES_TO_MOVE {
+            app.game.ranking.record(9_000);
         }
         app.game.start_round();
         app.game.time_left = 0.0;
         app.game.tick(0.2);
-        assert!(app.game.season_outcome.is_some(), "expected a finished season");
+        assert_eq!(app.game.phase, Phase::Over, "expected the round to have ended");
         app
     }
 
@@ -1006,7 +1028,7 @@ mod tests {
         assert!(screen.contains_rect(ready), "start card overflows: {ready:?}");
 
         // A season-ending round shows the most content: board, stats, table and all.
-        let mut app = app_at_season_end();
+        let mut app = app_after_round();
         let over = overlay_rect(&mut app, |a, ctx| a.overlay_results(ctx));
         assert!(screen.contains_rect(over), "results card overflows: {over:?}");
     }
@@ -1018,7 +1040,7 @@ mod tests {
         for height in [560.0, 640.0, 700.0] {
             let size = Vec2::new(1000.0, height);
             let screen = Rect::from_min_size(Pos2::ZERO, size);
-            let mut app = app_at_season_end();
+            let mut app = app_after_round();
             let over = overlay_rect_at(&mut app, |a, ctx| a.overlay_results(ctx), size);
             assert!(
                 screen.contains_rect(over),
@@ -1111,15 +1133,6 @@ mod tests {
         // One frame, all the way across: every tile in between must still register.
         let crossed = g.tiles_along(g.center(row[0]), g.center(row[SIZE - 1]));
         assert_eq!(crossed, row, "a flick skipped a letter: {crossed:?}");
-    }
-
-    #[test]
-    fn ordinals_read_correctly() {
-        let got: Vec<String> = [1, 2, 3, 4, 6, 11, 12, 13, 21, 22].iter().map(|n| ordinal(*n)).collect();
-        assert_eq!(
-            got,
-            ["1st", "2nd", "3rd", "4th", "6th", "11th", "12th", "13th", "21st", "22nd"]
-        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! beat the clock.
 
 use crate::dictionary::{Dictionary, MIN_WORD_LEN};
-use crate::league::{Save, Season, SeasonOutcome};
+use crate::league::{RankChange, Ranking};
 use crate::themes::{Theme, Themes};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -14,8 +14,8 @@ pub const SIZE: usize = 4;
 pub const ROUND_SECONDS: f32 = 180.0;
 /// How long the scorecard holds before the next round begins.
 pub const RESULTS_SECONDS: f32 = 60.0;
-/// One full cycle: play, then read the results.
-pub const CYCLE_SECONDS: f32 = ROUND_SECONDS + RESULTS_SECONDS;
+/// Everyone is on the same cycle, so the scorecard is a fixed window rather than
+/// something you dismiss: when it runs out the next round begins.
 
 /// The 16 standard Boggle dice. Rolling real dice gives a far better letter mix
 /// than sampling letter frequencies independently, which tends to strand vowels.
@@ -68,7 +68,7 @@ pub struct Cell {
     pub letters: &'static str,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
     Ready,
     Playing,
@@ -105,11 +105,12 @@ pub struct Game {
     themes: Themes,
     pub score: u32,
     pub time_left: f32,
+    /// Seconds left on the scorecard before the next round starts on its own.
+    pub results_left: f32,
     pub phase: Phase,
-    pub best_score: u32,
-    pub season: Season,
-    /// Set when the round just played closed out a season; applied on the next start.
-    pub season_outcome: Option<SeasonOutcome>,
+    pub ranking: Ranking,
+    /// How the round just played moved you on the ladder.
+    pub rank_change: Option<RankChange>,
     pub is_dragging: bool,
 
     // Presentation state the UI animates against.
@@ -125,7 +126,7 @@ impl Game {
         let dictionary = Dictionary::new();
         let themes = Themes::load();
         let (grid, words, theme) = generate_board(&dictionary, &themes);
-        let save = Save::load();
+        let ranking = Ranking::load();
 
         Game {
             dictionary,
@@ -139,10 +140,10 @@ impl Game {
             themes,
             score: 0,
             time_left: ROUND_SECONDS,
+            results_left: RESULTS_SECONDS,
             phase: Phase::Ready,
-            best_score: save.best_score,
-            season: save.season,
-            season_outcome: None,
+            ranking,
+            rank_change: None,
             is_dragging: false,
             feedback: Feedback::None,
             feedback_word: String::new(),
@@ -153,12 +154,7 @@ impl Game {
     }
 
     pub fn start_round(&mut self) {
-        // A finished season is settled here rather than at the final whistle, so the
-        // scorecard can show the final table before the ladder moves.
-        if let Some(outcome) = self.season_outcome.take() {
-            self.season = Season::new(outcome.to);
-            self.persist();
-        }
+        self.rank_change = None;
 
         let (grid, words, theme) = generate_board(&self.dictionary, &self.themes);
         self.grid = grid;
@@ -170,6 +166,7 @@ impl Game {
         self.found_set.clear();
         self.score = 0;
         self.time_left = ROUND_SECONDS;
+        self.results_left = RESULTS_SECONDS;
         self.phase = Phase::Playing;
         self.is_dragging = false;
         self.clear_feedback();
@@ -181,6 +178,17 @@ impl Game {
             if self.feedback_timer <= 0.0 {
                 self.clear_feedback();
             }
+        }
+
+        // The scorecard is a timed window, not a screen you dismiss: the next round
+        // starts when it runs out, keeping every player on the same cycle.
+        if self.phase == Phase::Over {
+            self.results_left -= dt;
+            if self.results_left <= 0.0 {
+                self.results_left = 0.0;
+                self.start_round();
+            }
+            return;
         }
 
         if self.phase != Phase::Playing {
@@ -196,19 +204,11 @@ impl Game {
 
     fn end_round(&mut self) {
         self.phase = Phase::Over;
+        self.results_left = RESULTS_SECONDS;
         self.path.clear();
         self.is_dragging = false;
-        self.best_score = self.best_score.max(self.score);
-
-        self.season.record_round(self.score, self.board_par());
-        if self.season.is_complete() {
-            self.season_outcome = Some(self.season.outcome());
-        }
-        self.persist();
-    }
-
-    fn persist(&self) {
-        Save::store(self.best_score, &self.season);
+        self.rank_change = Some(self.ranking.record(self.score));
+        self.ranking.store();
     }
 
     // --- tracing -----------------------------------------------------------
@@ -404,19 +404,12 @@ impl Game {
         self.found_set.contains(word)
     }
 
-    pub fn rank(&self) -> &'static str {
-        match self.score {
-            s if s >= 12_000 => "WORD HERO",
-            s if s >= 8_000 => "Word Master",
-            s if s >= 5_000 => "Wordsmith",
-            s if s >= 2_500 => "Apprentice",
-            s if s >= 800 => "Novice",
-            _ => "Rookie",
-        }
+    pub fn best_score(&self) -> u32 {
+        self.ranking.best_score
     }
 
     pub fn is_new_best(&self) -> bool {
-        self.score > 0 && self.score >= self.best_score
+        self.score > 0 && self.score >= self.ranking.best_score
     }
 }
 
@@ -880,7 +873,8 @@ mod tests {
     fn a_round_is_three_minutes_then_a_minute_of_results() {
         assert_eq!(ROUND_SECONDS, 180.0);
         assert_eq!(RESULTS_SECONDS, 60.0);
-        assert_eq!(CYCLE_SECONDS, 240.0);
+        // One four-minute cycle, which is what a shared clock would tick on.
+        assert_eq!(ROUND_SECONDS + RESULTS_SECONDS, 240.0);
     }
 
     #[test]
