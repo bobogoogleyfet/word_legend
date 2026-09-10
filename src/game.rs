@@ -4,12 +4,18 @@
 use crate::dictionary::{Dictionary, MIN_WORD_LEN};
 use crate::league::{Save, Season, SeasonOutcome};
 use crate::themes::{Theme, Themes};
+use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use std::collections::HashSet;
 
 pub const SIZE: usize = 4;
-pub const ROUND_SECONDS: f32 = 120.0;
+/// A live round. Everyone playing is on the same one at the same time.
+pub const ROUND_SECONDS: f32 = 180.0;
+/// How long the scorecard holds before the next round begins.
+pub const RESULTS_SECONDS: f32 = 60.0;
+/// One full cycle: play, then read the results.
+pub const CYCLE_SECONDS: f32 = ROUND_SECONDS + RESULTS_SECONDS;
 
 /// The 16 standard Boggle dice. Rolling real dice gives a far better letter mix
 /// than sampling letter frequencies independently, which tends to strand vowels.
@@ -443,7 +449,20 @@ fn generate_board(
     dict: &Dictionary,
     themes: &Themes,
 ) -> ([[Cell; SIZE]; SIZE], BoardWords, Option<String>) {
-    let mut rng = rand::thread_rng();
+    generate_board_seeded(dict, themes, rand::random::<u64>())
+}
+
+/// Build the board for a given seed.
+///
+/// Synchronised play needs every client to arrive at the same board without the
+/// board itself being sent, so generation must be a pure function of the seed:
+/// no thread RNG, and every collection sorted into a total order before use.
+pub fn generate_board_seeded(
+    dict: &Dictionary,
+    themes: &Themes,
+    seed: u64,
+) -> ([[Cell; SIZE]; SIZE], BoardWords, Option<String>) {
+    let mut rng = StdRng::seed_from_u64(seed);
 
     // Build a themed board when we can; a plain roll is the fallback, not the plan.
     if let Some(theme) = themes.list.choose(&mut rng) {
@@ -789,6 +808,79 @@ mod tests {
         for word in &words.theme {
             assert!(is_traceable(&grid, word));
         }
+    }
+
+    /// Synchronised play stands on this: two clients given the same seed must build
+    /// the identical board, or they are not playing the same game.
+    #[test]
+    fn a_seed_always_builds_the_same_board() {
+        let dict = Dictionary::new();
+        let themes = Themes::load();
+
+        for seed in [0u64, 1, 42, 9_999, u64::MAX] {
+            let (grid_a, words_a, theme_a) = generate_board_seeded(&dict, &themes, seed);
+            let (grid_b, words_b, theme_b) = generate_board_seeded(&dict, &themes, seed);
+
+            let letters = |g: &[[Cell; SIZE]; SIZE]| {
+                (0..SIZE)
+                    .map(|r| (0..SIZE).map(|c| g[r][c].letters).collect::<String>())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(letters(&grid_a), letters(&grid_b), "seed {seed} drifted");
+            assert_eq!(theme_a, theme_b, "seed {seed} changed theme");
+            assert_eq!(words_a.common, words_b.common, "seed {seed} changed solutions");
+            assert_eq!(words_a.theme, words_b.theme, "seed {seed} changed theme words");
+        }
+    }
+
+    /// Pinned boards. Synchronised clients only agree if generation is byte-stable,
+    /// so a change here means old and new clients would silently play different
+    /// boards from the same seed -- a deliberate decision, never an accident.
+    #[test]
+    fn seeded_boards_are_pinned() {
+        let dict = Dictionary::new();
+        let themes = Themes::load();
+
+        let board_of = |seed| {
+            let (g, w, t) = generate_board_seeded(&dict, &themes, seed);
+            let rows: Vec<String> = (0..SIZE)
+                .map(|r| (0..SIZE).map(|c| g[r][c].letters).collect::<Vec<_>>().join("|"))
+                .collect();
+            (rows, t, w.common.len())
+        };
+
+        let (rows, theme, count) = board_of(42);
+        assert_eq!(rows, ["r|l|d|h", "u|e|c|i", "r|l|s|r", "k|n|a|c"]);
+        assert_eq!(theme.as_deref(), Some("Tools"));
+        assert_eq!(count, 117);
+
+        let (rows, theme, count) = board_of(1234);
+        assert_eq!(rows, ["s|a|l|t", "c|h|e|p", "e|m|s|w", "e|t|e|h"]);
+        assert_eq!(theme.as_deref(), Some("Food"));
+        assert_eq!(count, 131);
+    }
+
+    #[test]
+    fn different_seeds_build_different_boards() {
+        let dict = Dictionary::new();
+        let themes = Themes::load();
+        let letters = |seed| {
+            let (g, _, _) = generate_board_seeded(&dict, &themes, seed);
+            (0..SIZE)
+                .map(|r| (0..SIZE).map(|c| g[r][c].letters).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("/")
+        };
+        let boards: std::collections::HashSet<String> = (0..20).map(letters).collect();
+        // Infinite boards means consecutive rounds must not repeat themselves.
+        assert!(boards.len() >= 19, "only {} distinct boards from 20 seeds", boards.len());
+    }
+
+    #[test]
+    fn a_round_is_three_minutes_then_a_minute_of_results() {
+        assert_eq!(ROUND_SECONDS, 180.0);
+        assert_eq!(RESULTS_SECONDS, 60.0);
+        assert_eq!(CYCLE_SECONDS, 240.0);
     }
 
     #[test]
