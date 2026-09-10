@@ -1,9 +1,10 @@
-mod dictionary;
-mod game;
+pub mod dictionary;
+pub mod export;
+pub mod game;
 mod identity;
 mod league;
 mod storage;
-mod themes;
+pub mod themes;
 mod ui;
 
 pub use ui::WordLegendApp;
