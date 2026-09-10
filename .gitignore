@@ -13,3 +13,18 @@ debug/
 
 # MSVC Windows builds of rustc generate these
 *.pdb
+
+# --- secrets -----------------------------------------------------------------
+# NOTHING below this line may ever be committed. Cloudflare credentials live in
+# `wrangler secret put` (server side) and GitHub Actions secrets (deploy side),
+# never in the repository.
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+*.secret
+secrets.json
+wrangler.toml.local
+.wrangler/
+server/node_modules/
+node_modules/
