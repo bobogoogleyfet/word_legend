@@ -2,6 +2,7 @@ pub mod dictionary;
 pub mod export;
 pub mod game;
 mod identity;
+pub mod net;
 mod league;
 mod storage;
 pub mod themes;
