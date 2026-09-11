@@ -8,6 +8,6 @@
     "test": "node test.mjs ../rounds/pack-0.json"
   },
   "devDependencies": {
-    "wrangler": "^3"
+    "wrangler": "^4.131.0"
   }
 }
