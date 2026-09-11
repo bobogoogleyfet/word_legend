@@ -12,6 +12,10 @@ name = "word-legend"
 main = "src/index.js"
 compatibility_date = "2026-01-01"
 
+# Serve on <worker>.<subdomain>.workers.dev. On by default, but stated outright
+# so a deploy cannot silently succeed while serving nothing.
+workers_dev = true
+
 # Fill in after: npx wrangler kv namespace create ROUNDS
 [[kv_namespaces]]
 binding = "ROUNDS"
