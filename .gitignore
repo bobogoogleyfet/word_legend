@@ -5,6 +5,10 @@ debug/
 # Web build output, produced by build-web.sh
 /dist
 
+# Precomputed round packs. Regenerate with:
+#   cargo run --release --bin export_rounds -- rounds 1000
+/rounds
+
 # Cargo.lock is deliberately tracked: this is an application, not a library, and
 # the Pages workflow builds with --locked.
 
