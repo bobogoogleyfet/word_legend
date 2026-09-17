@@ -206,6 +206,36 @@ await test("obscure words score 10% more, and a superword scores its bonus", asy
   assert.equal(await score(["cats", "adits"]), 400 + 880);
 });
 
+await test("the letter bonus follows the traced paths, and only valid ones", async () => {
+  // C A T S across the top, E A R S under it.
+  const grid = ["c", "a", "t", "s", "e", "a", "r", "s", "z", "z", "z", "z", "z", "z", "z", "z"];
+  const e = envWith({ grid, theme: null, words: ["cat", "cats", "ears", "sat"], obscure: [] });
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  const score = async (words, paths) =>
+    (await body(await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words, paths }) }))).score;
+
+  assert.equal(await score(["cats"]), 400, "no paths, no bonus");
+  assert.equal(await score(["cats"], [[0, 1, 2, 3]]), 400 + 4 * 100, "four yellow stars");
+  // CAT reuses C, A and T: three green stars.
+  assert.equal(await score(["cats", "cat"], [[0, 1, 2, 3], [0, 1, 2]]), 400 + 100 + 4 * 100 + 3 * 25);
+  // A path that does not spell its word, or jumps, earns nothing.
+  assert.equal(await score(["cats"], [[4, 5, 6, 7]]), 400, "a path spelling EARS was counted for CATS");
+  assert.equal(await score(["cats"], [[0, 1, 2, 15]]), 400, "a path that jumps across the board was counted");
+});
+
+await test("using every letter adds 500", async () => {
+  const grid = "characterization".split("");
+  const e = envWith({ grid, theme: null, words: ["characterization"], obscure: [] });
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  // Snake across the rows so every step touches the last.
+  const path = [0, 1, 2, 3, 7, 6, 5, 4, 8, 9, 10, 11, 15, 14, 13, 12];
+  const snaked = path.map((i) => grid[i]).join("");
+  const e2 = envWith({ grid, theme: null, words: [snaked], obscure: [] });
+  await call(e2, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  const res = await body(await call(e2, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: [snaked], paths: [path] }) }));
+  assert.equal(res.bonus, 16 * 100 + 500);
+});
+
 await test("an older pack, with both tiers in words, still scores everything as common", async () => {
   const e = envWith({ grid: Array(16).fill("a"), theme: null, words: ["cat", "adit"] });
   await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });

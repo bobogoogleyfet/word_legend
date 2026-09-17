@@ -84,6 +84,9 @@ struct ScoreRequest<'a> {
     id: &'a str,
     round: u64,
     words: &'a [String],
+    /// The tiles traced for each word, for the letter bonus.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    paths: &'a [Vec<u8>],
 }
 
 /// How the game is currently getting its boards.
@@ -252,12 +255,12 @@ impl Client {
 
     /// Hand the round's words over to be scored. The score comes back from the
     /// server; whatever the client thinks it earned is not part of the request.
-    pub fn submit(&self, id: &str, round: u64, words: &[String]) {
+    pub fn submit(&self, id: &str, round: u64, words: &[String], paths: &[Vec<u8>]) {
         if !self.is_configured() {
             return;
         }
         let shared = Arc::clone(&self.shared);
-        let body = serde_json::to_vec(&ScoreRequest { id, round, words }).unwrap_or_default();
+        let body = serde_json::to_vec(&ScoreRequest { id, round, words, paths }).unwrap_or_default();
 
         self.fetch(post(format!("{}/score", self.base), body), move |result| {
             let answered = matches!(&result, Ok(r) if r.ok || r.status < 500);
@@ -274,11 +277,11 @@ impl Client {
     /// leaderboard from the moment they join, so it is complete the moment the
     /// round ends. Nothing is banked; a refusal (the round just ended) is expected
     /// and ignored.
-    pub fn progress(&self, id: &str, round: u64, words: &[String]) {
+    pub fn progress(&self, id: &str, round: u64, words: &[String], paths: &[Vec<u8>]) {
         if !self.is_configured() {
             return;
         }
-        let body = serde_json::to_vec(&ScoreRequest { id, round, words }).unwrap_or_default();
+        let body = serde_json::to_vec(&ScoreRequest { id, round, words, paths }).unwrap_or_default();
         self.fetch(post(format!("{}/progress", self.base), body), |_| {});
     }
 

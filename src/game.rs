@@ -54,6 +54,14 @@ pub const SUPERWORD_POINTS: u32 = 20_000;
 /// Obscure words score this many tenths of a common word's points: 10% more, for
 /// knowing them.
 const OBSCURE_TENTHS: u32 = 11;
+
+/// The letter bonus, for using the whole board. Each letter used in a found word
+/// (a yellow star) earns this much...
+pub const LETTER_USED_BONUS: u32 = 100;
+/// ...each letter used in two or more (a green star) this much again...
+pub const LETTER_REUSED_BONUS: u32 = 25;
+/// ...and using every letter on the board this much more on top.
+pub const FULL_BOARD_BONUS: u32 = 500;
 /// A longest word at least this long makes an unthemed board a "Long" one.
 const LONG_BOARD_LEN: usize = 10;
 /// Attempts the dictionary-free derivation makes at a board that looks playable.
@@ -103,6 +111,9 @@ pub enum Feedback {
 pub struct FoundWord {
     pub word: String,
     pub points: u32,
+    /// The tiles traced to spell it. The letter bonus follows the tiles actually
+    /// used, and a word can often be traced more than one way.
+    pub path: Vec<Position>,
 }
 
 pub struct Game {
@@ -355,13 +366,37 @@ impl Game {
         }
 
         let points = self.word_score(&word);
-        self.score += points;
         for at in &cells {
             self.tile_uses[at.row][at.col] += 1;
         }
         self.found_set.insert(word.clone());
-        self.found.push(FoundWord { word: word.clone(), points });
+        self.found.push(FoundWord { word: word.clone(), points, path: cells.clone() });
+        // Words, plus whatever the letter bonus has grown to with this one.
+        self.score = self.found.iter().map(|w| w.points).sum::<u32>() + self.letter_bonus();
         self.set_feedback(Feedback::Accepted, word, points, cells);
+    }
+
+    /// The bonus the letters used so far have earned.
+    pub fn letter_bonus(&self) -> u32 {
+        letter_bonus(&self.tile_uses)
+    }
+
+    /// Leave a round part way through. Whatever was scored is banked now, exactly
+    /// as if the round had ended, and the player goes back to the home screen
+    /// rather than on to the scorecard.
+    pub fn leave_round(&mut self) {
+        if self.phase != Phase::Playing {
+            return;
+        }
+        self.end_round();
+        self.phase = Phase::Ready;
+    }
+
+    /// Put the scorecard away. The round was banked when it ended.
+    pub fn close_results(&mut self) {
+        if self.phase == Phase::Over {
+            self.phase = Phase::Ready;
+        }
     }
 
     fn set_feedback(&mut self, kind: Feedback, word: String, points: u32, cells: Vec<Position>) {
@@ -383,8 +418,11 @@ impl Game {
     // --- round summary -----------------------------------------------------
 
     /// Everything the board was worth: the score if every common word were found.
+    /// Everything on offer: every common word, and the letter bonus they would
+    /// earn together -- a tile in one common word is a yellow star, in two a green.
     pub fn board_par(&self) -> u32 {
-        self.words.common.iter().map(|w| score_word(w, false)).sum()
+        let words: u32 = self.words.common.iter().map(|w| score_word(w, false)).sum();
+        words + letter_bonus(&self.words.coverage)
     }
 
     /// What a word on this board scores, by its length and its tier.
@@ -409,11 +447,12 @@ impl Game {
         (self.found_count() as f32 / self.findable_count() as f32).min(1.0)
     }
 
+    /// Points per word found: the words' own points, not the letter bonus.
     pub fn average_points(&self) -> f32 {
         if self.found.is_empty() {
             return 0.0;
         }
-        self.score as f32 / self.found.len() as f32
+        self.found.iter().map(|w| w.points).sum::<u32>() as f32 / self.found.len() as f32
     }
 
     /// Seconds of the round spent per word found.
@@ -498,6 +537,15 @@ impl Game {
         self.found.iter().map(|w| w.word.clone()).collect()
     }
 
+    /// The path traced for each found word, in the same order, as tile indices
+    /// (row * 4 + column): what the server checks the letter bonus against.
+    pub fn found_paths(&self) -> Vec<Vec<u8>> {
+        self.found
+            .iter()
+            .map(|w| w.path.iter().map(|p| (p.row * SIZE + p.col) as u8).collect())
+            .collect()
+    }
+
     pub fn has_found(&self, word: &str) -> bool {
         self.found_set.contains(word)
     }
@@ -524,6 +572,16 @@ pub fn word_points(len: usize) -> u32 {
         8 => 2_200,
         n => 2_200 + 400 * (n as u32 - 8),
     }
+}
+
+/// The letter bonus for how often each tile has been used: every used letter,
+/// every reused letter, and the whole board. The server works it out the same way
+/// from the paths it is sent.
+pub fn letter_bonus(uses: &[[u32; SIZE]; SIZE]) -> u32 {
+    let used = uses.iter().flatten().filter(|u| **u >= 1).count() as u32;
+    let reused = uses.iter().flatten().filter(|u| **u >= 2).count() as u32;
+    let full = if used == (SIZE * SIZE) as u32 { FULL_BOARD_BONUS } else { 0 };
+    used * LETTER_USED_BONUS + reused * LETTER_REUSED_BONUS + full
 }
 
 /// What a word scores: a superword its flat bonus, anything else its length's
@@ -975,7 +1033,62 @@ mod tests {
             game.extend_path(Position { row: 0, col });
         }
         game.submit_path();
-        assert_eq!(game.score, 440, "an obscure word did not score 10% more");
+        assert_eq!(game.found[0].points, 440, "an obscure word did not score 10% more");
+        assert_eq!(game.score, 440 + game.letter_bonus());
+    }
+
+    #[test]
+    fn the_letter_bonus_pays_for_used_letters_reused_ones_and_the_whole_board() {
+        let mut uses = [[0u32; SIZE]; SIZE];
+        assert_eq!(letter_bonus(&uses), 0);
+        uses[0][0] = 1;
+        assert_eq!(letter_bonus(&uses), 100, "a yellow star is 100");
+        uses[0][0] = 2;
+        assert_eq!(letter_bonus(&uses), 125, "a green star adds 25");
+        uses[0][0] = 7;
+        assert_eq!(letter_bonus(&uses), 125, "more uses earn nothing further");
+        let all_once = [[1u32; SIZE]; SIZE];
+        assert_eq!(letter_bonus(&all_once), 16 * 100 + 500, "every letter used adds 500");
+        let all_twice = [[2u32; SIZE]; SIZE];
+        assert_eq!(letter_bonus(&all_twice), 16 * 125 + 500);
+
+        // A found word's score carries the bonus its letters earn.
+        let mut game = Game::new();
+        game.grid = board(["herd", "zzzz", "zzzz", "zzzz"]);
+        game.words = solve_board(&game.dictionary, &game.grid);
+        game.tile_uses = [[0; SIZE]; SIZE];
+        game.phase = Phase::Playing;
+        for col in 0..4 {
+            game.extend_path(Position { row: 0, col });
+        }
+        game.submit_path();
+        assert_eq!(game.score, word_points(4) + 4 * 100);
+        assert_eq!(game.found_paths(), vec![vec![0u8, 1, 2, 3]]);
+        // Three of its letters again, in "her": three green stars, 3 * 25 more.
+        for col in 0..3 {
+            game.extend_path(Position { row: 0, col });
+        }
+        game.submit_path();
+        assert_eq!(game.score, word_points(4) + word_points(3) + 4 * 100 + 3 * 25);
+    }
+
+    #[test]
+    fn leaving_a_round_banks_it_and_goes_home() {
+        let mut game = Game::new();
+        game.start_round();
+        game.score = 3_000;
+        let games = game.ranking.lifetime.games;
+        game.leave_round();
+        assert_eq!(game.phase, Phase::Ready, "leaving should go home, not to the scorecard");
+        assert_eq!(game.ranking.lifetime.games, games + 1, "the score was not banked");
+        assert_eq!(game.ranking.recent.back().copied(), Some(3_000));
+
+        game.start_round();
+        game.time_left = 0.0;
+        game.tick(0.2);
+        assert_eq!(game.phase, Phase::Over);
+        game.close_results();
+        assert_eq!(game.phase, Phase::Ready);
     }
 
     #[test]
@@ -1182,7 +1295,7 @@ mod tests {
         }
 
         assert_eq!(game.found.len(), 1);
-        assert_eq!(game.score, word_points(4));
+        assert_eq!(game.score, word_points(4) + letter_bonus(&game.tile_uses));
         assert_eq!(game.feedback, Feedback::Duplicate);
     }
 }

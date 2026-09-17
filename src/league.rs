@@ -70,20 +70,13 @@ pub struct RankChange {
 }
 
 impl RankChange {
+    /// "Promoted to GOLD" or "Dropped to SILVER". In words: an arrow between the
+    /// two leagues is not in every phone's font and drew as an empty box, and the
+    /// average is already on the scorecard.
     pub fn headline(&self) -> String {
         match self.movement {
-            Movement::Promoted => format!(
-                "{} \u{2192} {}  ·  {} avg",
-                LEAGUES[self.from].name.to_uppercase(),
-                LEAGUES[self.to].name.to_uppercase(),
-                self.average
-            ),
-            Movement::Relegated => format!(
-                "{} \u{2192} {}  ·  {} avg",
-                LEAGUES[self.from].name.to_uppercase(),
-                LEAGUES[self.to].name.to_uppercase(),
-                self.average
-            ),
+            Movement::Promoted => format!("Promoted to {}", LEAGUES[self.to].name.to_uppercase()),
+            Movement::Relegated => format!("Dropped to {}", LEAGUES[self.to].name.to_uppercase()),
             Movement::Held => String::new(),
         }
     }
@@ -423,6 +416,14 @@ mod tests {
         // Its recent scores become the start of its history.
         assert_eq!(old.history.len(), 2);
         assert_eq!(old.lifetime.games, 2);
+    }
+
+    #[test]
+    fn a_move_is_announced_in_words() {
+        let mut up = ranked(0, &[3_000; 9]);
+        assert_eq!(up.record(3_000).headline(), "Promoted to SILVER");
+        let mut down = ranked(2, &[1_000; 9]);
+        assert_eq!(down.record(1_000).headline(), "Dropped to SILVER");
     }
 
     #[test]

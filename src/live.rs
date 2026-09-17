@@ -21,8 +21,10 @@ const POLL_ONLINE: f64 = 30.0;
 const POLL_DOWN: f64 = 15.0;
 /// Minimum gap between reads made because a new board is needed right now.
 const POLL_URGENT: f64 = 2.0;
-/// How long to wait for a first answer before giving up and playing solo.
-const CONNECT_GRACE: f64 = 6.0;
+/// How long to wait for a first answer before giving up and playing solo. Phones
+/// on a slow connection can take several seconds; giving up too soon drops a
+/// player into a solo board while everyone else is on the shared one.
+const CONNECT_GRACE: f64 = 10.0;
 /// Scorecard refresh while final scores are still landing, just after a round.
 const LEADERBOARD_EVERY_EARLY: f64 = 2.0;
 /// How long after handing in to keep refreshing at the early rate.
@@ -135,6 +137,44 @@ impl Live {
             Phase::Over if game.round.is_some() => {}
             Phase::Ready | Phase::Over => self.start_next(game, now),
         }
+    }
+
+    /// Leave the round being played. The score is banked and, on a shared round,
+    /// handed in as final straight away, so it is on the leaderboard now rather
+    /// than when the round ends. The player is not put into the next round.
+    pub fn leave(&mut self, game: &mut Game, me: Option<&Identity>, now: f64) {
+        self.joined = false;
+        if game.phase != Phase::Playing {
+            return;
+        }
+        if let (Some(round), Some(me)) = (game.round, me) {
+            if self.name == NameStatus::Claimed && self.submitted != Some(round) {
+                self.client.submit(&me.id, round, &game.found_words(), &game.found_paths());
+                self.submitted = Some(round);
+                self.submitted_at = now;
+            }
+        }
+        game.leave_round();
+    }
+
+    /// Put the scorecard away and go home, out of the cycle of rounds. Nothing is
+    /// lost: the round was banked and handed in when it ended.
+    pub fn close_results(&mut self, game: &mut Game) {
+        self.joined = false;
+        game.close_results();
+    }
+
+    /// Stop waiting for the next round.
+    pub fn leave_queue(&mut self) {
+        self.joined = false;
+    }
+
+    /// Asked to play, but waiting for the next shared round to start.
+    pub fn queued(&self, game: &Game, now: f64) -> bool {
+        self.joined
+            && game.phase == Phase::Ready
+            && self.is_live(now)
+            && self.clock.is_some_and(|c| !c.playing || c.left < MIN_JOIN_SECONDS || game.round == Some(c.round))
     }
 
     /// Ask for a name now, rather than waiting for the next frame's housekeeping.
@@ -343,7 +383,7 @@ impl Live {
                 _ => true,
             };
             if due {
-                self.client.progress(&me.id, round, &game.found_words());
+                self.client.progress(&me.id, round, &game.found_words(), &game.found_paths());
                 self.progress = Some((round, now, found));
             }
         }
@@ -356,7 +396,7 @@ impl Live {
         }
 
         if self.submitted != Some(round) && self.name == NameStatus::Claimed {
-            self.client.submit(&me.id, round, &game.found_words());
+            self.client.submit(&me.id, round, &game.found_words(), &game.found_paths());
             self.submitted = Some(round);
             self.submitted_at = now;
             self.next_leaderboard = now + LEADERBOARD_FIRST;
@@ -584,7 +624,7 @@ mod tests {
         game.submit_path();
         live.update(&mut game, Some(&me()), 10.5);
         assert_eq!(sent_matching(&live, "POST /progress").len(), 2, "a new word was not reported");
-        game.found.push(crate::game::FoundWord { word: "mace".into(), points: 400 });
+        game.found.push(crate::game::FoundWord { word: "mace".into(), points: 400, path: Vec::new() });
         live.update(&mut game, Some(&me()), 11.0);
         assert_eq!(sent_matching(&live, "POST /progress").len(), 2, "reported again within seconds");
         live.update(&mut game, Some(&me()), 15.0);
@@ -602,6 +642,47 @@ mod tests {
         live.update(&mut game, Some(&me()), 103.1);
         assert_eq!(sent_matching(&live, "GET /leaderboard").len(), 2);
         assert_eq!(sent_matching(&live, "POST /progress").len(), 3, "progress was sent after the round ended");
+    }
+
+    #[test]
+    fn leaving_a_round_hands_the_score_in_now_and_stays_out_of_the_next() {
+        let mut game = Game::new();
+        let mut live = online();
+        serve(&live, 40, "play", 100.0, 0.0);
+        live.update(&mut game, Some(&me()), 0.0);
+        accept_name(&live);
+        live.update(&mut game, Some(&me()), 0.1);
+        live.play_now(&mut game, 0.1);
+        for col in 0..4 {
+            game.extend_path(crate::game::Position { row: 0, col });
+        }
+        game.submit_path();
+
+        live.leave(&mut game, Some(&me()), 30.0);
+        assert_eq!(game.phase, Phase::Ready);
+        let scores = sent_matching(&live, "POST /score");
+        assert_eq!(scores.len(), 1, "leaving did not hand the score in");
+        assert!(scores[0].contains("\"came\"") && scores[0].contains("\"paths\":[[0,1,2,3]]"), "{}", scores[0]);
+
+        // The round ends and the next begins: a player who left is not pulled back in.
+        live.update(&mut game, Some(&me()), 101.0);
+        serve(&live, 41, "play", 179.0, 131.0);
+        live.update(&mut game, Some(&me()), 132.0);
+        assert_eq!(game.phase, Phase::Ready, "a player who left was put into the next round");
+        assert_eq!(sent_matching(&live, "POST /score").len(), 1, "the round was handed in twice");
+    }
+
+    #[test]
+    fn a_player_who_asks_to_play_between_rounds_is_queued() {
+        let mut game = Game::new();
+        let mut live = online();
+        serve(&live, 40, "results", 20.0, 0.0);
+        live.update(&mut game, Some(&me()), 0.0);
+        assert!(!live.queued(&game, 0.0));
+        live.play_now(&mut game, 0.0);
+        assert!(live.queued(&game, 0.0), "waiting for the next round should read as queued");
+        live.leave_queue();
+        assert!(!live.queued(&game, 0.0));
     }
 
     #[test]

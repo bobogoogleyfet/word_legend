@@ -41,6 +41,41 @@ function scoreWord(word, obscure) {
   return obscure ? (points * 11) / 10 : points;
 }
 
+/**
+ * The letter bonus, matching the client's `letter_bonus`: 100 for each tile used
+ * in a found word, 25 more for each used in two or more, and 500 for using every
+ * tile. It follows the paths the player traced, each checked against the board.
+ */
+const LETTER_USED_BONUS = 100;
+const LETTER_REUSED_BONUS = 25;
+const FULL_BOARD_BONUS = 500;
+
+/** A path is the tiles, as indices 0-15, a word was traced through. */
+function pathSpells(grid, word, path) {
+  if (!Array.isArray(path) || path.length === 0 || path.length > 16) return false;
+  const seen = new Set();
+  let spelled = "";
+  for (let i = 0; i < path.length; i++) {
+    const tile = path[i];
+    if (!Number.isInteger(tile) || tile < 0 || tile > 15 || seen.has(tile)) return false;
+    seen.add(tile);
+    if (i > 0) {
+      const prev = path[i - 1];
+      const dr = Math.abs(Math.floor(tile / 4) - Math.floor(prev / 4));
+      const dc = Math.abs((tile % 4) - (prev % 4));
+      if (dr > 1 || dc > 1) return false;
+    }
+    spelled += grid[tile];
+  }
+  return spelled === word;
+}
+
+function letterBonus(uses) {
+  const used = uses.filter((u) => u >= 1).length;
+  const reused = uses.filter((u) => u >= 2).length;
+  return used * LETTER_USED_BONUS + reused * LETTER_REUSED_BONUS + (used === 16 ? FULL_BOARD_BONUS : 0);
+}
+
 function wordPoints(length) {
   if (length <= 2) return 0;
   if (length === 3) return 100;
@@ -192,18 +227,27 @@ async function scoreSubmission(request, env, body, phase) {
   const accepted = [];
   const rejected = [];
   const seen = new Set();
-  for (const raw of words.slice(0, 500)) {
+  const paths = Array.isArray(body.paths) ? body.paths : [];
+  const uses = new Array(16).fill(0);
+  const grid = board.grid.map((t) => String(t).toLowerCase());
+  words.slice(0, 500).forEach((raw, i) => {
     const word = String(raw || "").toLowerCase();
-    if (seen.has(word)) continue; // a word scores once
+    if (seen.has(word)) return; // a word scores once
     seen.add(word);
     if (board.words.has(word)) {
       score += scoreWord(word, board.obscure.has(word));
       accepted.push(word);
+      // Its tiles count toward the letter bonus only if its path really spells it.
+      if (pathSpells(grid, word, paths[i])) {
+        for (const tile of paths[i]) uses[tile] += 1;
+      }
     } else {
       rejected.push(word);
     }
-  }
-  return { id, round, player, score, accepted, rejected };
+  });
+  const bonus = letterBonus(uses);
+  score += bonus;
+  return { id, round, player, score, bonus, accepted, rejected };
 }
 
 /**
@@ -223,7 +267,7 @@ async function postProgress(request, env, body) {
 async function postScore(request, env, body) {
   const result = await scoreSubmission(request, env, body);
   if (result.error) return result.error;
-  const { id, round, player, score, accepted, rejected } = result;
+  const { id, round, player, score, bonus, accepted, rejected } = result;
 
   await leaderboard(env, round).submit(id, player.name, score, accepted.length, true);
 
@@ -237,7 +281,7 @@ async function postScore(request, env, body) {
   }
 
   const average = recent.length ? Math.round(recent.reduce((a, b) => a + b, 0) / recent.length) : 0;
-  return json(request, env, { score, accepted: accepted.length, rejected, average });
+  return json(request, env, { score, bonus, accepted: accepted.length, rejected, average });
 }
 
 /** The table for a round, names and scores only. */

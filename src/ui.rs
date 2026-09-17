@@ -117,6 +117,8 @@ pub struct WordLegendApp {
     results_tab: ResultsTab,
     /// The stats page is open.
     show_stats: bool,
+    /// Asking whether to leave the round being played.
+    confirm_leave: bool,
     /// A letter tapped on the scorecard's board, if any.
     letter_focus: Option<LetterFocus>,
     /// A word tapped in any of the scorecard's lists, and its path, drawn on the
@@ -155,6 +157,7 @@ impl WordLegendApp {
             identity,
             results_tab: ResultsTab::Leaderboard,
             show_stats: false,
+            confirm_leave: false,
             letter_focus: None,
             shown_word: None,
             drag_from: None,
@@ -232,7 +235,12 @@ impl WordLegendApp {
             self.shown_word = None;
         }
 
+        if self.game.phase != Phase::Playing {
+            self.confirm_leave = false;
+        }
+
         match self.game.phase {
+            Phase::Playing if self.confirm_leave => self.overlay_confirm_leave(ctx),
             _ if self.show_stats => self.overlay_stats(ctx),
             Phase::Ready => self.overlay_ready(ctx),
             Phase::Over => self.overlay_results(ctx),
@@ -687,15 +695,16 @@ impl WordLegendApp {
 
     fn board_area(&mut self, ui: &mut egui::Ui) {
         const PILL_H: f32 = 44.0;
-        const HINT_H: f32 = 20.0;
-        const GAP: f32 = 14.0;
+        /// The theme, the letter bonus and its key, the hint, and Leave.
+        const BELOW_H: f32 = 22.0 + 20.0 + 18.0 + 20.0 + 32.0;
+        const GAP: f32 = 12.0;
 
         let avail = ui.available_size();
-        let board_size = (avail.y - PILL_H - HINT_H - GAP * 2.0)
+        let board_size = (avail.y - PILL_H - BELOW_H - GAP * 2.0)
             .min(avail.x)
             .min(540.0)
             .max(240.0);
-        let slack = avail.y - (PILL_H + HINT_H + GAP * 2.0 + board_size);
+        let slack = avail.y - (PILL_H + BELOW_H + GAP * 2.0 + board_size);
 
         ui.vertical_centered(|ui| {
             ui.add_space((slack * 0.5).max(0.0));
@@ -703,12 +712,69 @@ impl WordLegendApp {
             ui.add_space(GAP);
             self.board(ui, board_size);
             ui.add_space(GAP);
+
+            // What kind of board this is.
+            let kind = match &self.game.theme {
+                Some(theme) => format!("Theme: {theme}"),
+                None if !self.game.superwords().is_empty() => "Superword board: one word fills every tile".to_string(),
+                None => String::new(),
+            };
+            ui.add_sized([ui.available_width(), 22.0], egui::Label::new(egui::RichText::new(kind).size(15.0).color(GOLD).strong()));
+
+            // The letter bonus so far, and what earns it.
+            ui.label(
+                egui::RichText::new(format!("Letter bonus +{}", thousands(self.game.letter_bonus() as usize)))
+                    .size(14.0)
+                    .color(TEXT)
+                    .strong(),
+            );
+            ui.label(bonus_key());
+
             let hint = if is_narrow(ui.ctx()) {
                 "Drag across touching letters"
             } else {
                 "Drag across touching letters — or click them one by one, then Enter"
             };
             ui.label(egui::RichText::new(hint).size(12.0).color(MUTED));
+
+            if self.game.phase == Phase::Playing {
+                ui.add_space(4.0);
+                if ui.button(egui::RichText::new("Leave round").size(13.0)).clicked() {
+                    self.confirm_leave = true;
+                }
+            }
+        });
+    }
+
+    /// Are you sure? Leaving banks what has been scored, now.
+    fn overlay_confirm_leave(&mut self, ctx: &egui::Context) {
+        self.page(ctx, false, |app, ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(if is_narrow(ui.ctx()) { 120.0 } else { 10.0 });
+                ui.label(egui::RichText::new("Leave this round?").size(26.0).color(TEXT).strong());
+                ui.add_space(12.0);
+                let score = app.game.score;
+                let (line, detail) = if score > 0 {
+                    (
+                        format!("You'll leave with {} points.", thousands(score as usize)),
+                        "They count toward your average and go on the leaderboard now.",
+                    )
+                } else {
+                    ("You haven't found any words yet.".to_string(), "Nothing will be recorded.")
+                };
+                ui.label(egui::RichText::new(line).size(16.0).color(GOLD).strong());
+                ui.label(egui::RichText::new(detail).size(13.0).color(MUTED));
+                ui.add_space(24.0);
+                if big_button(ui, "LEAVE ROUND", RED) {
+                    let me = app.identity.clone();
+                    app.live.leave(&mut app.game, me.as_ref(), app.now);
+                    app.confirm_leave = false;
+                }
+                ui.add_space(10.0);
+                if big_button(ui, "KEEP PLAYING", ACCENT) {
+                    app.confirm_leave = false;
+                }
+            });
         });
     }
 
@@ -996,6 +1062,11 @@ impl WordLegendApp {
                 }
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new(note).size(13.0).color(color));
+                if app.live.queued(&app.game, app.now)
+                    && ui.link(egui::RichText::new("Leave the queue").size(12.0).color(ACCENT)).clicked()
+                {
+                    app.live.leave_queue();
+                }
 
                 ui.add_space(26.0);
                 ui.horizontal(|ui| {
@@ -1033,8 +1104,12 @@ impl WordLegendApp {
             ),
             (Some(_), _) => {
                 let next = self.next_shared_round_in().unwrap_or(0.0);
-                let button = if waiting { "YOU'RE IN" } else { "JOIN NEXT ROUND" };
-                (button.to_string(), format!("Next round starts in {}", clock_text(next)), AMBER)
+                if waiting {
+                    let text = format!("You're queued for the next round · starts in {}", clock_text(next));
+                    ("QUEUED".to_string(), text, GREEN)
+                } else {
+                    ("JOIN NEXT ROUND".to_string(), format!("Next round starts in {}", clock_text(next)), AMBER)
+                }
             }
             (None, Link::Connecting) if self.live.is_live(self.now) => (
                 "START ROUND".to_string(),
@@ -1113,13 +1188,7 @@ impl WordLegendApp {
                     ui.add_space(12.0);
                     app.stacked(ui, |app, ui| app.word_area(ui, 130.0));
                     ui.add_space(18.0);
-                    let left = app.game.results_left.max(0.0);
-                    ui.label(
-                        egui::RichText::new(format!("Next round in {}s", left.ceil() as u32))
-                            .size(15.0)
-                            .color(if left <= 10.0 { AMBER } else { MUTED })
-                            .strong(),
-                    );
+                    app.results_footer(ui);
                 }
                 Some(round) => {
                     ui.horizontal_top(|ui| {
@@ -1134,29 +1203,12 @@ impl WordLegendApp {
                         });
                     });
                     ui.add_space(18.0);
-                    // A shared scorecard is everyone's, so it runs out rather than
-                    // being skipped.
-                    let left = app.game.results_left.max(0.0);
-                    ui.label(
-                        egui::RichText::new(format!("Next round in {}s", left.ceil() as u32))
-                            .size(15.0)
-                            .color(if left <= 10.0 { AMBER } else { MUTED })
-                            .strong(),
-                    );
+                    app.results_footer(ui);
                 }
                 None => {
                     app.word_area(ui, 130.0);
                     ui.add_space(18.0);
-                    if big_button(ui, "NEXT ROUND", ACCENT) {
-                        app.live.play_now(&mut app.game, app.now);
-                    }
-                    ui.add_space(6.0);
-                    let left = app.next_shared_round_in().unwrap_or(app.game.results_left.max(0.0));
-                    ui.label(
-                        egui::RichText::new(format!("Next round in {}s", left.ceil() as u32))
-                            .size(12.0)
-                            .color(if left <= 10.0 { AMBER } else { MUTED }),
-                    );
+                    app.results_footer(ui);
                 }
             }
         });
@@ -1232,17 +1284,39 @@ impl WordLegendApp {
         }
 
         ui.add_space(6.0);
-        ui.vertical_centered(|ui| {
-            if self.game.round.is_some() {
-                let left = self.game.results_left.max(0.0);
-                ui.label(
-                    egui::RichText::new(format!("Next round in {}s", left.ceil() as u32))
-                        .size(15.0)
-                        .color(if left <= 10.0 { AMBER } else { MUTED })
-                        .strong(),
-                );
-            } else if ui.button(egui::RichText::new("NEXT ROUND").size(14.0).strong()).clicked() {
-                self.live.play_now(&mut self.game, self.now);
+        self.results_footer(ui);
+    }
+
+    /// Seconds until the next round begins: the scorecard's own window on a shared
+    /// round; after a solo one, the next shared round if there is a server, or the
+    /// solo scorecard's window.
+    fn next_round_in(&self) -> f32 {
+        if self.game.round.is_some() {
+            return self.game.results_left.max(0.0);
+        }
+        match self.next_shared_round_in() {
+            Some(left) => left.max(self.game.results_left.max(0.0)),
+            None => self.game.results_left.max(0.0),
+        }
+    }
+
+    /// The foot of every scorecard: a countdown to the next round, which starts on
+    /// its own, and a way home for a player who is done. Going home loses nothing:
+    /// the round was banked and handed in when it ended.
+    fn results_footer(&mut self, ui: &mut egui::Ui) {
+        let left = self.next_round_in();
+        ui.horizontal(|ui| {
+            let label = egui::RichText::new(format!("Next round in {}s", left.ceil() as u32))
+                .size(15.0)
+                .color(if left <= 10.0 { AMBER } else { MUTED })
+                .strong();
+            let width = ui.fonts(|f| f.layout_no_wrap(format!("Next round in {}s", left.ceil() as u32), FontId::proportional(15.0), TEXT).size().x);
+            let button_width = 110.0;
+            ui.add_space(((ui.available_width() - width - button_width - 16.0) / 2.0).max(0.0));
+            ui.label(label);
+            ui.add_space(16.0);
+            if ui.button(egui::RichText::new("Back to home").size(13.0)).clicked() {
+                self.live.close_results(&mut self.game);
             }
         });
     }
@@ -1260,6 +1334,7 @@ impl WordLegendApp {
             ("Avg points/word", format!("{:.0}", g.average_points())),
             ("Time per word", format!("{:.1}s", g.seconds_per_word())),
             ("Avg word length", format!("{:.1}", g.average_word_length())),
+            ("Letter bonus", format!("+{}", thousands(g.letter_bonus() as usize))),
             ("Board type", g.board_type()),
         ];
         for (label, value) in rows {
@@ -1557,8 +1632,8 @@ impl WordLegendApp {
         }
 
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            for (label, color) in [("unused", BLUE), ("used once", AMBER), ("reused", GREEN)] {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for (label, color) in [("unused", BLUE), ("used", AMBER), ("reused", GREEN)] {
                 ui.label(egui::RichText::new(format!("\u{25a0} {label}")).size(10.0).color(color));
             }
         });
@@ -1566,7 +1641,7 @@ impl WordLegendApp {
 
     fn round_stats(&self, ui: &mut egui::Ui) {
         let g = &self.game;
-        let rows: [(&str, String); 6] = [
+        let rows: [(&str, String); 7] = [
             ("Score", format!("{} / {}", g.score, g.board_par())),
             (
                 "Words found",
@@ -1580,6 +1655,7 @@ impl WordLegendApp {
             ("Avg points per word", format!("{:.0}", g.average_points())),
             ("Time per word", format!("{:.1}s", g.seconds_per_word())),
             ("Avg word length", format!("{:.1}", g.average_word_length())),
+            ("Letter bonus", format!("+{}", thousands(g.letter_bonus() as usize))),
             ("Board type", g.board_type()),
         ];
 
@@ -1928,7 +2004,8 @@ impl WordLegendApp {
             Movement::Relegated => RED,
             Movement::Held => return,
         };
-        ui.label(egui::RichText::new(change.headline()).size(22.0).color(color).strong());
+        let size = if is_narrow(ui.ctx()) { 18.0 } else { 22.0 };
+        ui.label(egui::RichText::new(change.headline()).size(size).color(color).strong());
         ui.add_space(8.0);
     }
 
@@ -2353,6 +2430,21 @@ fn league_ladder(ui: &mut egui::Ui, league: usize, average: u32) {
     });
 }
 
+/// What earns the letter bonus, with the stars that mark it.
+fn bonus_key() -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let font = FontId::proportional(11.0);
+    let mut add = |text: &str, color: Color32| {
+        job.append(text, 0.0, egui::TextFormat { font_id: font.clone(), color, ..Default::default() });
+    };
+    add("\u{2605}", GOLD);
+    add(" +100 each letter used   ", MUTED);
+    add("\u{2605}", GREEN);
+    add(" +25 used again   all letters +500", MUTED);
+    job.halign = egui::Align::Center;
+    job
+}
+
 /// A titled group of label/value rows, for the stats page.
 fn stat_block(ui: &mut egui::Ui, title: &str, rows: &[(&str, String)]) {
     ui.label(egui::RichText::new(title).size(14.0).color(TEXT).strong());
@@ -2523,6 +2615,17 @@ mod tests {
             app.identity = Some(Identity { id: "0123456789ABCDEF".into(), name: "longest_name_16c".into() });
         }
         app
+    }
+
+    /// Run more frames on an existing context; the last frame's shapes.
+    fn run_frames_on(app: &mut WordLegendApp, ctx: &egui::Context, size: Vec2, frames: usize) -> Vec<egui::Shape> {
+        let screen = Rect::from_min_size(Pos2::ZERO, size);
+        let mut shapes = Vec::new();
+        for _ in 0..frames {
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            shapes = painted(ctx.run(input, |ctx| app.frame(ctx)).shapes);
+        }
+        shapes
     }
 
     /// Run whole frames at a screen size; the context and the last frame's shapes.
@@ -3289,6 +3392,85 @@ mod tests {
             frame(&mut app, vec![egui::Event::PointerMoved(at), button(at, true)]);
             frame(&mut app, vec![button(at, false)]);
             assert!(app.shown_word.is_none(), "tapping the word again did not clear its path at {size:?}");
+        }
+    }
+
+    fn click(app: &mut WordLegendApp, ctx: &egui::Context, screen: Rect, at: Pos2) {
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        for events in [vec![egui::Event::PointerMoved(at), button(true)], vec![button(false)], vec![]] {
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let _ = ctx.run(input, |ctx| app.frame(ctx));
+        }
+    }
+
+    fn text_centre(shapes: &[egui::Shape], text: &str) -> Option<Pos2> {
+        shapes.iter().rev().find_map(|s| match s {
+            egui::Shape::Text(t) if t.galley.job.text == text => Some(s.visual_bounding_rect().center()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn leaving_a_round_asks_first_then_banks_the_score_and_goes_home() {
+        for size in [PHONES[0], Vec2::new(1000.0, 780.0)] {
+            let mut app = offline_app(true);
+            app.game.start_round();
+            app.game.theme = Some("Halloween".into());
+            app.game.score = 2_400;
+            let games = app.game.ranking.lifetime.games;
+            let (ctx, shapes) = run_frames(&mut app, size, 6);
+            let screen = Rect::from_min_size(Pos2::ZERO, size);
+            let texts = texts_of(&shapes);
+            assert!(texts.iter().any(|t| t == "Theme: Halloween"), "no theme under the board at {size:?}");
+            assert!(texts.iter().any(|t| t.starts_with("Letter bonus +")), "no letter bonus under the board at {size:?}");
+            assert_fits("playing", &shapes, size);
+
+            // Leave round: a confirmation first, nothing banked yet.
+            click(&mut app, &ctx, screen, text_centre(&shapes, "Leave round").expect("a Leave round button"));
+            let shapes = run_frames_on(&mut app, &ctx, size, 4);
+            let texts = texts_of(&shapes);
+            assert!(texts.iter().any(|t| t == "Leave this round?"), "no confirmation at {size:?}");
+            assert!(texts.iter().any(|t| t == "You'll leave with 2,400 points."), "the confirmation does not say what is kept");
+            assert_eq!(app.game.phase, Phase::Playing);
+
+            // Keep playing: back to the round.
+            click(&mut app, &ctx, screen, text_centre(&shapes, "KEEP PLAYING").unwrap());
+            assert!(!app.confirm_leave && app.game.phase == Phase::Playing, "Keep playing did not return to the round");
+
+            // Leave for real: banked, and home.
+            let shapes = run_frames_on(&mut app, &ctx, size, 2);
+            click(&mut app, &ctx, screen, text_centre(&shapes, "Leave round").unwrap());
+            let shapes = run_frames_on(&mut app, &ctx, size, 4);
+            click(&mut app, &ctx, screen, text_centre(&shapes, "LEAVE ROUND").unwrap());
+            assert_eq!(app.game.phase, Phase::Ready, "leaving did not go home at {size:?}");
+            assert_eq!(app.game.ranking.lifetime.games, games + 1, "leaving did not bank the score");
+        }
+    }
+
+    #[test]
+    fn a_scorecard_counts_down_to_the_next_round_and_has_a_way_home() {
+        for size in [PHONES[0], Vec2::new(1000.0, 780.0)] {
+            for shared in [false, true] {
+                let mut app = offline_app(true);
+                app.game.start_round();
+                app.game.score = 1_000;
+                app.game.time_left = 0.0;
+                app.game.tick(0.2);
+                if shared {
+                    app.game.round = Some(7);
+                }
+                app.live.play_now(&mut app.game, 0.0);
+                let (ctx, shapes) = run_frames(&mut app, size, 8);
+                let texts = texts_of(&shapes);
+                assert!(texts.iter().any(|t| t.starts_with("Next round in ")), "no countdown (shared {shared}) at {size:?}");
+                assert!(!texts.iter().any(|t| t == "NEXT ROUND"), "a button to press on is still there at {size:?}");
+                assert_fits("scorecard", &shapes, size);
+
+                let screen = Rect::from_min_size(Pos2::ZERO, size);
+                click(&mut app, &ctx, screen, text_centre(&shapes, "Back to home").expect("a way home"));
+                assert_eq!(app.game.phase, Phase::Ready, "Back to home did not go home (shared {shared}) at {size:?}");
+                assert!(!app.live.joined(), "going home should leave the cycle of rounds");
+            }
         }
     }
 
