@@ -206,6 +206,21 @@ await test("a resubmission replaces the player's row rather than adding one", as
   assert.equal(table.entries[0].words, realWords.length);
 });
 
+await test("a round with nothing found is on the table but not banked", async () => {
+  const e = env();
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  const played = await body(await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: realWords }) }));
+  const e2 = env();
+  await call(e2, "/claim", { method: "POST", body: JSON.stringify({ id: ID2, name: "idler" }) });
+  const idle = await body(await call(e2, "/score", { method: "POST", body: JSON.stringify({ id: ID2, round: roundInfo.round, words: [] }) }));
+  assert.equal(idle.score, 0);
+  assert.equal(idle.average, 0);
+  assert.deepEqual((await e2.ROUNDS.get(`player:${ID2}`, "json")).recent, [], "a zero was banked");
+  const table = await body(await call(e2, `/leaderboard?round=${roundInfo.round}`));
+  assert.deepEqual(table.entries.map((r) => [r.name, r.score]), [["idler", 0]], "the idle player is missing from the table");
+  assert.ok(played.score > 0);
+});
+
 await test("rank is the average of the last ten rounds", async () => {
   const e = env();
   await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });

@@ -174,11 +174,16 @@ async function postScore(request, env, body) {
 
   await leaderboard(env, round).submit(id, player.name, score, accepted.length);
 
-  // Rank is the average of the last ten rounds, same as the client shows.
-  const recent = [...(player.recent ?? []), score].slice(-10);
-  await env.ROUNDS.put(`player:${id}`, JSON.stringify({ ...player, recent }));
+  // Rank is the average of the last ten rounds, same as the client shows. A round
+  // with nothing found was not played -- it is on the leaderboard as a zero, but
+  // it is not banked, or leaving a tab open would drag the average down.
+  let recent = player.recent ?? [];
+  if (score > 0) {
+    recent = [...recent, score].slice(-10);
+    await env.ROUNDS.put(`player:${id}`, JSON.stringify({ ...player, recent }));
+  }
 
-  const average = Math.round(recent.reduce((a, b) => a + b, 0) / recent.length);
+  const average = recent.length ? Math.round(recent.reduce((a, b) => a + b, 0) / recent.length) : 0;
   return json(request, env, { score, accepted: accepted.length, rejected, average });
 }
 
