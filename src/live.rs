@@ -158,6 +158,9 @@ impl Live {
     /// Put a table in place as if the server had sent it.
     #[cfg(test)]
     pub fn show_leaderboard(&mut self, table: Leaderboard) {
+        if let Ok(mut shared) = self.client.shared().lock() {
+            shared.leaderboard = Some(table.clone());
+        }
         self.leaderboard = Some(table);
     }
 

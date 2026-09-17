@@ -245,8 +245,20 @@ impl Game {
         self.results_left = RESULTS_SECONDS;
         self.path.clear();
         self.is_dragging = false;
-        self.rank_change = Some(self.ranking.record(self.score));
-        self.ranking.store();
+        // A round with nothing found was not played -- a tab left open, a player
+        // who wandered off -- and a zero would drag the rank average down for it.
+        // It still goes on the leaderboard; it just is not banked.
+        self.rank_change = None;
+        if self.counts_toward_rank() {
+            self.rank_change = Some(self.ranking.record(self.score));
+            self.ranking.store();
+        }
+    }
+
+    /// Whether this round is banked into the rank average. Only a round in which
+    /// the player actually scored is.
+    pub fn counts_toward_rank(&self) -> bool {
+        self.score > 0
     }
 
     // --- tracing -----------------------------------------------------------

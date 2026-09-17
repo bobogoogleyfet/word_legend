@@ -58,6 +58,14 @@ impl Signup {
 /// Below this window height the results card cannot fit and has to scroll.
 const SHORT_WINDOW: f32 = 720.0;
 
+/// Below this width -- a phone held upright -- layouts stack instead of sitting
+/// side by side, and the found-words panel gives its room to the board.
+const NARROW: f32 = 600.0;
+
+fn is_narrow(ctx: &egui::Context) -> bool {
+    ctx.screen_rect().width() < NARROW
+}
+
 /// Seconds left at which the clock starts pulsing red.
 const PANIC_TIME: f32 = 15.0;
 
@@ -112,6 +120,13 @@ impl WordLegendApp {
 
 impl eframe::App for WordLegendApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.frame(ctx);
+    }
+}
+
+impl WordLegendApp {
+    /// One whole frame. Separate from `update` so tests can run it headlessly.
+    fn frame(&mut self, ctx: &egui::Context) {
         // egui's own frame delta, not `Instant`: `Instant::now()` panics outright on
         // wasm32-unknown-unknown, which would take the whole web build down.
         // Clamped so a stalled tab (backgrounded, or a slow first frame) cannot
@@ -132,9 +147,12 @@ impl eframe::App for WordLegendApp {
         style(ctx);
         self.handle_keys(ctx);
 
+        let narrow = is_narrow(ctx);
+        let hud_margin = if narrow { egui::Margin::symmetric(12, 8) } else { egui::Margin::symmetric(20, 14) };
         egui::TopBottomPanel::top("hud")
-            .frame(egui::Frame::default().fill(PANEL).inner_margin(egui::Margin::symmetric(20, 14)))
-            .show(ctx, |ui| self.hud(ui));
+            .resizable(false)
+            .frame(egui::Frame::default().fill(PANEL).inner_margin(hud_margin))
+            .show(ctx, |ui| if narrow { self.hud_narrow(ui) } else { self.hud(ui) });
 
         // On a narrow window (a phone in the web build) the side panel would squeeze
         // the board into nothing, so drop it and let the board have the room.
@@ -147,8 +165,9 @@ impl eframe::App for WordLegendApp {
                 .show(ctx, |ui| self.found_panel(ui));
         }
 
+        let board_margin = if narrow { egui::Margin::same(10) } else { egui::Margin::same(16) };
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(BG).inner_margin(egui::Margin::same(16)))
+            .frame(egui::Frame::default().fill(BG).inner_margin(board_margin))
             .show(ctx, |ui| self.board_area(ui));
 
         if self.needs_signup() {
@@ -258,7 +277,10 @@ impl WordLegendApp {
         // text field rather than painted text, so it can be selected and copied
         // with Ctrl+C like any other text, and the icon beside it copies it whole.
         let code = pending.recovery_code();
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(420.0, 56.0), Sense::hover());
+        let box_width = ui.available_width().min(420.0);
+        // Smaller type in a phone-width box, so the code and its icon still fit.
+        let code_size = if box_width < 400.0 { 20.0 } else { 26.0 };
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(box_width, 56.0), Sense::hover());
         let painter = ui.painter();
         painter.rect_filled(rect, 10.0, TILE);
         painter.rect_stroke(rect, 10.0, Stroke::new(2.0_f32, GOLD), egui::StrokeKind::Inside);
@@ -273,7 +295,7 @@ impl WordLegendApp {
             text,
             egui::TextEdit::singleline(&mut shown)
                 .id(egui::Id::new(RECOVERY_CODE_ID))
-                .font(FontId::monospace(26.0))
+                .font(FontId::monospace(code_size))
                 .text_color(GOLD)
                 .horizontal_align(egui::Align::Center)
                 .vertical_align(egui::Align::Center)
@@ -310,7 +332,7 @@ impl WordLegendApp {
         ui.add_space(4.0);
         ui.add(
             egui::TextEdit::singleline(&mut self.signup.name)
-                .desired_width(280.0)
+                .desired_width(ui.available_width().min(280.0))
                 .hint_text(hint("pick a name")),
         );
 
@@ -354,13 +376,14 @@ impl WordLegendApp {
         }
 
         // The field and its button side by side, centred as one row.
+        let field_width = (ui.available_width() - 8.0 - 70.0).min(320.0);
         ui.allocate_ui_with_layout(
-            Vec2::new(320.0 + 8.0 + 70.0, 30.0),
+            Vec2::new(field_width + 8.0 + 70.0, 30.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.signup.code)
-                        .desired_width(320.0)
+                        .desired_width(field_width)
                         .font(egui::TextStyle::Monospace)
                         .hint_text(hint("XXXX-XXXX-XXXX-XXXX")),
                 );
@@ -389,7 +412,7 @@ impl WordLegendApp {
         ui.label(egui::RichText::new("DISPLAY NAME").size(11.0).color(MUTED).strong());
         ui.add(
             egui::TextEdit::singleline(&mut self.signup.name)
-                .desired_width(280.0)
+                .desired_width(ui.available_width().min(280.0))
                 .hint_text(hint("pick a name")),
         );
         let checked = identity::check_name(&self.signup.name);
@@ -451,6 +474,8 @@ impl WordLegendApp {
     // --- heads-up display --------------------------------------------------
 
     fn hud(&mut self, ui: &mut egui::Ui) {
+        // A heads-up display is one line of facts; wrapped, it grows downward.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new("WORD LEGEND").size(13.0).color(ACCENT).strong());
@@ -497,6 +522,40 @@ impl WordLegendApp {
         });
     }
 
+    /// The heads-up display for a phone: score and standing on one row, the clock
+    /// across the full width beneath. Side by side, as on a desktop, it ran off
+    /// the edge of the screen and took the clock with it.
+    fn hud_narrow(&mut self, ui: &mut egui::Ui) {
+        // Three equal columns. Laid out right-to-left instead, the name took the
+        // width and left the league a sliver to wrap into, one letter a line.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+        let rank = &self.game.ranking;
+        ui.columns(3, |cols| {
+            cols[0].label(
+                egui::RichText::new(thousands(self.game.score as usize)).size(26.0).color(TEXT).strong(),
+            );
+            // The found-words panel does not fit on a phone; the count does.
+            cols[0].label(egui::RichText::new(format!("{} found", self.game.found.len())).size(11.0).color(MUTED));
+
+            cols[1].label(
+                egui::RichText::new(LEAGUES[rank.league].name.to_uppercase())
+                    .size(13.0)
+                    .color(league_color(rank.league))
+                    .strong(),
+            );
+            cols[1].label(
+                egui::RichText::new(format!("{} avg", thousands(rank.average() as usize))).size(11.0).color(MUTED),
+            );
+
+            let name = self.identity.as_ref().map(|i| i.name.as_str()).unwrap_or("");
+            cols[2].label(egui::RichText::new(name).size(13.0).color(TEXT).strong());
+            let (label, color) = self.link_label();
+            cols[2].label(egui::RichText::new(label).size(11.0).color(color).strong());
+        });
+        ui.add_space(4.0);
+        self.timer_bar(ui);
+    }
+
     /// Whether this board is the one everyone is on, in a word.
     fn link_label(&self) -> (String, Color32) {
         match self.live.link() {
@@ -537,7 +596,8 @@ impl WordLegendApp {
             );
             ui.add_space(10.0);
 
-            let width = (ui.available_width() - 130.0).max(120.0);
+            // Room is left for the BEST column; never wider than what is there.
+            let width = (ui.available_width() - 80.0).max(40.0);
             let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 12.0), Sense::hover());
             let painter = ui.painter();
             painter.rect_filled(rect, 6.0, TILE);
@@ -584,11 +644,12 @@ impl WordLegendApp {
             ui.add_space(GAP);
             self.board(ui, board_size);
             ui.add_space(GAP);
-            ui.label(
-                egui::RichText::new("Drag across touching letters — or click them one by one, then Enter")
-                    .size(12.0)
-                    .color(MUTED),
-            );
+            let hint = if is_narrow(ui.ctx()) {
+                "Drag across touching letters"
+            } else {
+                "Drag across touching letters — or click them one by one, then Enter"
+            };
+            ui.label(egui::RichText::new(hint).size(12.0).color(MUTED));
         });
     }
 
@@ -808,7 +869,8 @@ impl WordLegendApp {
 
     fn overlay_ready(&mut self, ctx: &egui::Context) {
         self.overlay(ctx, |app, ui| {
-            ui.label(egui::RichText::new("WORD LEGEND").size(46.0).color(TEXT).strong());
+            let title = if is_narrow(ui.ctx()) { 34.0 } else { 46.0 };
+            ui.label(egui::RichText::new("WORD LEGEND").size(title).color(TEXT).strong());
             ui.label(
                 egui::RichText::new(format!("{} League", LEAGUES[app.game.ranking.league].name))
                     .size(16.0)
@@ -825,13 +887,15 @@ impl WordLegendApp {
             );
 
             ui.add_space(18.0);
-            ui.horizontal(|ui| {
-                ui.add_space(60.0);
-                ui.vertical(|ui| {
-                    ui.set_width(340.0);
+            let panel_width = ui.available_width().min(340.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(panel_width, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(panel_width);
                     app.form_panel(ui);
-                });
-            });
+                },
+            );
             ui.add_space(16.0);
 
             for line in [
@@ -921,29 +985,57 @@ impl WordLegendApp {
 
             ui.add_space(14.0);
 
+            // The columns below need this much room; with less -- a phone, a small
+            // tablet -- the card stacks them instead.
+            const COLUMNS_WIDTH: f32 = 196.0 + 16.0 + 250.0 + 16.0 + 300.0;
+            let narrow = ui.available_width() < COLUMNS_WIDTH;
+
             // The board you just played, the numbers that came out of it, and where
-            // that leaves you in the league -- side by side, so the card still fits.
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_width(196.0);
-                    app.used_board(ui, 180.0);
+            // that leaves you in the league: side by side on a desktop, so the card
+            // still fits; one above another on a phone, where it scrolls.
+            if narrow {
+                app.used_board(ui, 180.0);
+                ui.add_space(12.0);
+                app.stacked(ui, |app, ui| app.round_stats(ui));
+                ui.add_space(12.0);
+                app.stacked(ui, |app, ui| app.form_panel(ui));
+            } else {
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(196.0);
+                        app.used_board(ui, 180.0);
+                    });
+                    ui.add_space(16.0);
+                    ui.vertical(|ui| {
+                        ui.set_width(250.0);
+                        app.round_stats(ui);
+                    });
+                    ui.add_space(16.0);
+                    ui.vertical(|ui| {
+                        ui.set_width(300.0);
+                        app.form_panel(ui);
+                    });
                 });
-                ui.add_space(16.0);
-                ui.vertical(|ui| {
-                    ui.set_width(250.0);
-                    app.round_stats(ui);
-                });
-                ui.add_space(16.0);
-                ui.vertical(|ui| {
-                    ui.set_width(300.0);
-                    app.form_panel(ui);
-                });
-            });
+            }
 
             ui.add_space(12.0);
             app.rank_banner(ui);
+            app.unplayed_notice(ui);
 
             match app.game.round {
+                Some(round) if narrow => {
+                    app.stacked(ui, |app, ui| app.leaderboard(ui, round));
+                    ui.add_space(12.0);
+                    app.stacked(ui, |app, ui| app.word_tabs(ui));
+                    ui.add_space(18.0);
+                    let left = app.game.results_left.max(0.0);
+                    ui.label(
+                        egui::RichText::new(format!("Next round in {}s", left.ceil() as u32))
+                            .size(15.0)
+                            .color(if left <= 10.0 { AMBER } else { MUTED })
+                            .strong(),
+                    );
+                }
                 Some(round) => {
                     ui.horizontal_top(|ui| {
                         ui.vertical(|ui| {
@@ -1338,6 +1430,36 @@ impl WordLegendApp {
         }
     }
 
+    /// A full-width, left-aligned section inside a centred card, for the phone
+    /// layout's stacked sections.
+    fn stacked(&mut self, ui: &mut egui::Ui, contents: impl FnOnce(&mut Self, &mut egui::Ui)) {
+        let width = ui.available_width();
+        ui.allocate_ui_with_layout(Vec2::new(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.set_width(width);
+            contents(self, ui);
+        });
+    }
+
+    /// Said when a round had nothing found in it: it is on the leaderboard as a
+    /// zero, but the rank average is left alone.
+    fn unplayed_notice(&self, ui: &mut egui::Ui) {
+        if self.game.counts_toward_rank() {
+            return;
+        }
+        ui.label(
+            egui::RichText::new("You didn't find any words this round.")
+                .size(14.0)
+                .color(AMBER)
+                .strong(),
+        );
+        ui.label(
+            egui::RichText::new("It won't count toward your rank, but you're on the leaderboard with 0.")
+                .size(12.0)
+                .color(MUTED),
+        );
+        ui.add_space(8.0);
+    }
+
     /// Shown only on a round that actually moved you up or down.
     fn rank_banner(&self, ui: &mut egui::Ui) {
         let Some(change) = self.game.rank_change else { return };
@@ -1362,28 +1484,32 @@ impl WordLegendApp {
         // Pinned near the top rather than centred: an Area anchored to the centre
         // only gets the space below its own origin, which capped the scroll area
         // at ~400px and hid the button under a fold.
-        const MARGIN: f32 = 24.0;
-        let width = 900.0_f32.min(screen.width() - MARGIN * 2.0);
+        let narrow = screen.width() < NARROW;
+        let margin: f32 = if narrow { 10.0 } else { 24.0 };
+        let inner: i8 = if narrow { 16 } else { 30 };
+        let width = 900.0_f32.min(screen.width() - margin * 2.0);
 
         egui::Area::new(egui::Id::new("overlay"))
             .order(egui::Order::Foreground)
-            .anchor(Align2::CENTER_TOP, Vec2::new(0.0, MARGIN))
+            .anchor(Align2::CENTER_TOP, Vec2::new(0.0, margin))
             .show(ctx, |ui| {
                 ui.set_width(width);
                 egui::Frame::default()
                     .fill(PANEL)
                     .stroke(Stroke::new(1.0_f32, TILE_EDGE))
                     .corner_radius(18.0)
-                    .inner_margin(egui::Margin::same(30))
+                    .inner_margin(egui::Margin::same(inner))
                     .show(ui, |ui| {
                         // Laid out directly when there is room: a ScrollArea here
                         // collapses to about 400px regardless of the max height it
                         // is given, which hid the button under a fold. On a window
                         // too short for the card -- a phone in landscape, say --
                         // scrolling beats an unreachable button.
-                        if screen.height() < SHORT_WINDOW {
+                        // A phone's cards are stacked and long, so they always scroll.
+                        if screen.height() < SHORT_WINDOW || narrow {
                             egui::ScrollArea::vertical()
                                 .id_salt("overlay_scroll")
+                                .max_height(screen.height() - margin * 2.0 - inner as f32 * 2.0)
                                 .auto_shrink([false, true])
                                 .show(ui, |ui| {
                                     ui.vertical_centered(|ui| contents(self, ui));
@@ -1449,18 +1575,45 @@ impl BoardGeometry {
         self.rect(at).contains(pos).then_some(at)
     }
 
-    /// Every tile the segment `from` -> `to` passes over, in order, without repeats.
+    /// The tile whose centre circle a point is inside, for a drag already under
+    /// way.
+    ///
+    /// A drag is judged on circles, not the tiles' squares. A diagonal passes
+    /// right by the corners of the two tiles beside it, and on squares a finger
+    /// only a few pixels off the true diagonal clipped one and picked up a letter
+    /// nobody aimed at. Circles leave those corners empty: a diagonal can wander
+    /// about a third of a tile off line before it touches a neighbour, while a
+    /// straight drag still catches every tile it crosses near the middle.
+    pub fn tile_near(&self, pos: Pos2) -> Option<Position> {
+        let at = self.nearest(pos)?;
+        (self.center(at).distance(pos) <= self.tile * DRAG_HIT_RADIUS).then_some(at)
+    }
+
+    /// The tile whose square cell (tile plus half the gap around it) a point is in.
+    fn nearest(&self, pos: Pos2) -> Option<Position> {
+        let local = pos - self.origin - Vec2::splat(self.gap * 0.5);
+        let step = self.tile + self.gap;
+        let col = (local.x / step).floor();
+        let row = (local.y / step).floor();
+        if row < 0.0 || col < 0.0 || row >= SIZE as f32 || col >= SIZE as f32 {
+            return None;
+        }
+        Some(Position { row: row as usize, col: col as usize })
+    }
+
+    /// Every tile the segment `from` -> `to` passes through the centre circle of,
+    /// in order, without repeats.
     pub fn tiles_along(&self, from: Pos2, to: Pos2) -> Vec<Position> {
-        // A quarter of a tile is fine enough that the segment cannot cross a whole
-        // tile between samples, and coarse enough to stay cheap.
-        let stride = (self.tile * 0.25).max(1.0);
-        let steps = ((from.distance(to) / stride).ceil() as usize).clamp(1, 256);
+        // A tenth of a tile, so even a segment that only grazes a circle is sampled
+        // inside it.
+        let stride = (self.tile * 0.1).max(1.0);
+        let steps = ((from.distance(to) / stride).ceil() as usize).clamp(1, 512);
 
         let mut out: Vec<Position> = Vec::new();
         for i in 1..=steps {
             let t = i as f32 / steps as f32;
             let point = from + (to - from) * t;
-            if let Some(at) = self.tile_at(point) {
+            if let Some(at) = self.tile_near(point) {
                 if out.last() != Some(&at) {
                     out.push(at);
                 }
@@ -1469,6 +1622,9 @@ impl BoardGeometry {
         out
     }
 }
+
+/// Radius of a tile's drag target, as a fraction of the tile's width.
+const DRAG_HIT_RADIUS: f32 = 0.40;
 
 /// Blue for a tile no word used, amber for one used once, green for one reused.
 fn tile_use_color(uses: u32) -> Color32 {
@@ -1633,10 +1789,191 @@ mod tests {
             app.game.ranking.record(9_000);
         }
         app.game.start_round();
+        // A round with a score in it, so it is banked and can move the rank.
+        app.game.score = 9_000;
         app.game.time_left = 0.0;
         app.game.tick(0.2);
         assert_eq!(app.game.phase, Phase::Over, "expected the round to have ended");
         app
+    }
+
+    // --- phones ----------------------------------------------------------------
+
+    /// A Pixel held upright, a small Android phone, and a small tablet (which
+    /// gets the desktop layout), in CSS pixels.
+    const PHONES: [Vec2; 3] = [Vec2::new(411.0, 923.0), Vec2::new(360.0, 740.0), Vec2::new(700.0, 1000.0)];
+
+    /// An app that never touches the network, signed in unless told otherwise.
+    fn offline_app(signed_in: bool) -> WordLegendApp {
+        let mut app = WordLegendApp::new();
+        app.live = Live::new(net::Client::recording("https://server"));
+        if signed_in {
+            app.identity = Some(Identity { id: "0123456789ABCDEF".into(), name: "longest_name_16c".into() });
+        }
+        app
+    }
+
+    /// Run whole frames at a screen size; the context and the last frame's shapes.
+    fn run_frames(app: &mut WordLegendApp, size: Vec2, frames: usize) -> (egui::Context, Vec<egui::Shape>) {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, size);
+        let mut shapes = Vec::new();
+        for _ in 0..frames {
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            shapes = painted(ctx.run(input, |ctx| app.frame(ctx)).shapes);
+        }
+        (ctx, shapes)
+    }
+
+    /// Anything drawn past either side of the screen: the screenshot's clipped
+    /// clock and cut-off columns.
+    fn off_screen(shapes: &[egui::Shape], size: Vec2) -> Vec<String> {
+        shapes
+            .iter()
+            .filter_map(|shape| {
+                let r = shape.visual_bounding_rect();
+                let outside = r.is_finite() && (r.min.x < -0.5 || r.max.x > size.x + 0.5);
+                outside.then(|| match shape {
+                    egui::Shape::Text(t) => format!("text {:?} at {r:?}", t.galley.job.text),
+                    other => format!("{:?} at {r:?}", std::mem::discriminant(other)),
+                })
+            })
+            .collect()
+    }
+
+    fn assert_fits(what: &str, shapes: &[egui::Shape], size: Vec2) {
+        let spilled = off_screen(shapes, size);
+        assert!(spilled.is_empty(), "{what} at {size:?} draws off screen:\n{}", spilled.join("\n"));
+    }
+
+    #[test]
+    fn every_screen_fits_a_phone() {
+        for size in PHONES {
+            let mut app = offline_app(false);
+            let (_, shapes) = run_frames(&mut app, size, 4);
+            assert_fits("signup", &shapes, size);
+
+            let mut app = offline_app(false);
+            app.signup.restoring = true;
+            let (_, shapes) = run_frames(&mut app, size, 4);
+            assert_fits("restore", &shapes, size);
+
+            let mut app = offline_app(true);
+            for score in [3_000, 5_000, 4_200] {
+                app.game.ranking.record(score);
+            }
+            let (_, shapes) = run_frames(&mut app, size, 4);
+            assert_fits("start card", &shapes, size);
+
+            let mut app = offline_app(true);
+            app.game.start_round();
+            app.game.score = 123_400;
+            let (ctx, shapes) = run_frames(&mut app, size, 4);
+            assert_fits("playing", &shapes, size);
+            let texts: Vec<String> = shapes
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) => Some(t.galley.job.text.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert!(texts.iter().any(|t| t == "BEST"), "the clock row lost its BEST column at {size:?}");
+            let hud = egui::containers::panel::PanelState::load(&ctx, egui::Id::new("hud")).expect("hud").rect;
+            assert!(hud.height() <= 110.0, "the heads-up display is {}px tall at {size:?}", hud.height());
+
+            for shared in [false, true] {
+                let mut app = offline_app(true);
+                for _ in 0..crate::league::MIN_GAMES_TO_MOVE {
+                    app.game.ranking.record(9_000);
+                }
+                app.game.start_round();
+                app.game.score = 9_000;
+                app.game.time_left = 0.0;
+                app.game.tick(0.2);
+                if shared {
+                    app.game.round = Some(7);
+                    let entries = (0..12)
+                        .map(|i| net::Entry { name: format!("player_name_{i:02}"), score: 20_000 - i * 900, words: 30 })
+                        .collect();
+                    app.live.show_leaderboard(net::Leaderboard { round: 7, entries });
+                }
+                let (_, shapes) = run_frames(&mut app, size, 4);
+                assert_fits(if shared { "shared results" } else { "solo results" }, &shapes, size);
+            }
+        }
+    }
+
+    #[test]
+    fn a_round_with_nothing_found_is_shown_but_not_banked() {
+        let mut app = offline_app(true);
+        for score in [4_000, 6_000] {
+            app.game.ranking.record(score);
+        }
+        let before = app.game.ranking.recent.clone();
+
+        app.game.start_round();
+        app.game.round = Some(7);
+        app.game.time_left = 0.0;
+        app.game.tick(0.2);
+        assert_eq!(app.game.phase, Phase::Over);
+        assert_eq!(app.game.ranking.recent, before, "a round with no words moved the rank average");
+        assert!(app.game.rank_change.is_none());
+
+        // Still on the leaderboard, as a zero.
+        app.live.show_leaderboard(net::Leaderboard {
+            round: 7,
+            entries: vec![
+                net::Entry { name: "someone".into(), score: 5_000, words: 12 },
+                net::Entry { name: "longest_name_16c".into(), score: 0, words: 0 },
+            ],
+        });
+        let (_, shapes) = run_frames(&mut app, Vec2::new(1000.0, 780.0), 4);
+        let texts: Vec<String> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) => Some(t.galley.job.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == "You didn't find any words this round."), "no notice: {texts:?}");
+        assert!(texts.iter().any(|t| t == "you're #2 of 2"), "not placed on the table: {texts:?}");
+
+        // A round with a score in it is banked as before.
+        app.game.start_round();
+        app.game.score = 2_000;
+        app.game.time_left = 0.0;
+        app.game.tick(0.2);
+        assert_eq!(app.game.ranking.recent.len(), before.len() + 1);
+    }
+
+    /// Where a straight drag from one tile centre to another would pass, pushed
+    /// sideways by `offset` pixels.
+    fn offset_drag(g: &BoardGeometry, from: Position, to: Position, offset: f32) -> Vec<Position> {
+        let (a, b) = (g.center(from), g.center(to));
+        let normal = (b - a).normalized().rot90() * offset;
+        g.tiles_along(a + normal, b + normal)
+    }
+
+    #[test]
+    fn a_diagonal_drag_can_wander_without_picking_up_a_neighbour() {
+        let g = geom();
+        let (p, o) = (Position { row: 0, col: 0 }, Position { row: 1, col: 1 });
+        // A quarter of a tile off the true diagonal, either side: well beyond the
+        // few pixels the square hit-test allowed.
+        for offset in [-0.25 * g.tile, 0.25 * g.tile] {
+            let crossed = offset_drag(&g, p, o, offset);
+            assert_eq!(crossed, vec![p, o], "{offset}px off the diagonal picked up {crossed:?}");
+        }
+    }
+
+    #[test]
+    fn a_straight_drag_off_centre_still_catches_every_tile() {
+        let g = geom();
+        let row: Vec<Position> = (0..SIZE).map(|col| Position { row: 1, col }).collect();
+        for offset in [-0.3 * g.tile, 0.3 * g.tile] {
+            let crossed = offset_drag(&g, row[0], row[SIZE - 1], offset);
+            assert_eq!(crossed, row, "{offset}px off centre missed a tile");
+        }
     }
 
     /// The league table made these cards much taller; they must still fit the window.
