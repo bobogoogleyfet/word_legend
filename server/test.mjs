@@ -1,5 +1,5 @@
 // Worker tests. Run with: node test.mjs
-import worker from "./src/index.js";
+import worker, { Leaderboard } from "./src/index.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
@@ -20,9 +20,40 @@ function makeKV(seed = {}) {
   };
 }
 
+/**
+ * Stand-in for a Durable Object namespace: one instance per name, each with its
+ * own storage, called directly the way RPC calls it. Every call is awaited
+ * through a promise, as it would be across the RPC boundary.
+ */
+function makeNamespace(Class) {
+  const instances = new Map();
+  return {
+    getByName(name) {
+      if (!instances.has(name)) {
+        const store = new Map();
+        const storage = {
+          async put(key, value) { store.set(key, structuredClone(value)); },
+          async get(key) { return structuredClone(store.get(key)); },
+          async list({ prefix = "" } = {}) {
+            return new Map([...store].filter(([k]) => k.startsWith(prefix)).sort(([a], [b]) => a.localeCompare(b)));
+          },
+          async deleteAll() { store.clear(); },
+          async setAlarm() {},
+        };
+        instances.set(name, new Class({ storage }, {}));
+      }
+      const target = instances.get(name);
+      return new Proxy(target, {
+        get: (obj, prop) => (...args) => Promise.resolve().then(() => obj[prop](...args)),
+      });
+    },
+  };
+}
+
 const ORIGIN = "https://bobogoogleyfet.github.io";
 const env = () => ({
   ROUNDS: makeKV({ "pack:0": JSON.stringify(pack) }),
+  LEADERBOARD: makeNamespace(Leaderboard),
   ROUND_SECONDS: "180", RESULTS_SECONDS: "60",
   PACK_COUNT: "1", PACK_SIZE: String(pack.length),
   ALLOWED_ORIGINS: ORIGIN,
@@ -145,6 +176,34 @@ await test("the leaderboard shows names but never account ids", async () => {
   assert.equal(table.entries[0].name, "wordfan");
   assert.equal(table.entries[0].id, undefined, "an account id leaked onto the leaderboard");
   assert.ok(!JSON.stringify(table).includes(ID), "an account id leaked onto the leaderboard");
+});
+
+await test("players finishing at the same moment all reach the leaderboard", async () => {
+  // Everyone's round ends on the same tick, so submissions really do arrive
+  // together. A read-modify-write table loses all but one of them.
+  const e = env();
+  const players = ["0123456789ABCDEF", "FEDCBA9876543210", "0000111122223333", "ABCDABCDABCDABCD"];
+  for (const [i, id] of players.entries()) {
+    await call(e, "/claim", { method: "POST", body: JSON.stringify({ id, name: `player${i}` }) });
+  }
+  await Promise.all(players.map((id, i) =>
+    call(e, "/score", { method: "POST", body: JSON.stringify({ id, round: roundInfo.round, words: realWords.slice(0, i + 1) }) })
+  ));
+  const table = await body(await call(e, `/leaderboard?round=${roundInfo.round}`));
+  assert.equal(table.entries.length, players.length, `only ${table.entries.map((r) => r.name)} made the table`);
+  const scores = table.entries.map((r) => r.score);
+  assert.deepEqual(scores, [...scores].sort((a, b) => b - a), "the table is not best-first");
+});
+
+await test("a resubmission replaces the player's row rather than adding one", async () => {
+  const e = env();
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  for (const words of [realWords.slice(0, 1), realWords]) {
+    await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words }) });
+  }
+  const table = await body(await call(e, `/leaderboard?round=${roundInfo.round}`));
+  assert.equal(table.entries.length, 1);
+  assert.equal(table.entries[0].words, realWords.length);
 });
 
 await test("rank is the average of the last ten rounds", async () => {

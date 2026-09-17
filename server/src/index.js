@@ -10,7 +10,16 @@
  * uploaded as packs; the Worker scores a submission by looking each word up in
  * that set. A browser cannot invent a score, because it would have to invent
  * words that are genuinely on the board.
+ *
+ * Each round's leaderboard lives in its own Durable Object (see leaderboard.js),
+ * not in KV: scores for a round all land at once, and they must all be on the
+ * table, and visible to everyone, straight away.
  */
+
+export { Leaderboard } from "./leaderboard.js";
+
+/** The Durable Object holding a round's leaderboard. */
+const leaderboard = (env, round) => env.LEADERBOARD.getByName(`round:${round}`);
 
 const CYCLE = (env) => num(env.ROUND_SECONDS, 180) + num(env.RESULTS_SECONDS, 60);
 const num = (value, fallback) => {
@@ -163,14 +172,7 @@ async function postScore(request, env, body) {
     }
   }
 
-  const key = `round:${round}`;
-  const table = (await env.ROUNDS.get(key, "json")) || [];
-  const existing = table.findIndex((row) => row.id === id);
-  const row = { id, name: player.name, score, words: accepted.length };
-  if (existing >= 0) table[existing] = row;
-  else table.push(row);
-  table.sort((a, b) => b.score - a.score);
-  await env.ROUNDS.put(key, JSON.stringify(table), { expirationTtl: 60 * 60 * 24 * 7 });
+  await leaderboard(env, round).submit(id, player.name, score, accepted.length);
 
   // Rank is the average of the last ten rounds, same as the client shows.
   const recent = [...(player.recent ?? []), score].slice(-10);
@@ -184,12 +186,10 @@ async function postScore(request, env, body) {
 async function getLeaderboard(request, env, url) {
   const round = parseInt(url.searchParams.get("round") ?? "", 10);
   const target = Number.isFinite(round) ? round : schedule(env, Date.now() / 1000).round;
-  const table = (await env.ROUNDS.get(`round:${target}`, "json")) || [];
-  // Ids stay server-side: an id is the account, and a leaderboard is public.
-  return json(request, env, {
-    round: target,
-    entries: table.slice(0, 50).map(({ name, score, words }) => ({ name, score, words })),
-  });
+  // Ids stay inside the Durable Object: an id is the account, and a leaderboard
+  // is public.
+  const entries = await leaderboard(env, target).table(50);
+  return json(request, env, { round: target, entries });
 }
 
 export default {

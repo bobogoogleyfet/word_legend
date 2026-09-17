@@ -21,6 +21,16 @@ workers_dev = true
 binding = "ROUNDS"
 id = "d7917b76bba84c66bc342f857722550a"
 
+# One Durable Object per round holds that round's leaderboard. KV could not:
+# simultaneous submissions overwrote each other, and cached reads hid new scores.
+[[durable_objects.bindings]]
+name = "LEADERBOARD"
+class_name = "Leaderboard"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Leaderboard"]
+
 [vars]
 # Public knobs only. Secrets never appear here.
 ROUND_SECONDS = "180"
