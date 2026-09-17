@@ -546,6 +546,16 @@ impl WordLegendApp {
         // A heads-up display is one line of facts; wrapped, it grows downward.
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
         ui.horizontal(|ui| {
+            // The one way out of a round, first in the bar at the top left.
+            if self.game.phase == Phase::Playing {
+                ui.vertical(|ui| {
+                    ui.add_space(8.0);
+                    if action_button(ui, "LEAVE", RED).clicked() {
+                        self.confirm_leave = true;
+                    }
+                });
+                ui.add_space(20.0);
+            }
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new("WORD LEGEND").size(13.0).color(ACCENT).strong());
                 ui.label(
@@ -576,16 +586,6 @@ impl WordLegendApp {
 
             ui.add_space(24.0);
 
-            if self.game.phase == Phase::Playing {
-                ui.vertical(|ui| {
-                    ui.add_space(4.0);
-                    if action_button(ui, "LEAVE", RED).clicked() {
-                        self.confirm_leave = true;
-                    }
-                });
-                ui.add_space(16.0);
-            }
-
             ui.vertical(|ui| {
                 ui.add_space(4.0);
                 self.timer_bar(ui);
@@ -603,27 +603,28 @@ impl WordLegendApp {
         let league = self.game.ranking.league;
         let playing = self.game.phase == Phase::Playing;
         let mut leave = false;
+        let score = thousands(self.game.score as usize);
+        let found = format!("{} found", self.game.found.len());
+        let name = self.identity.as_ref().map(|i| i.name.clone()).unwrap_or_default();
+        let (link, link_color) = self.link_label();
         ui.columns(3, |cols| {
-            cols[0].label(
-                egui::RichText::new(thousands(self.game.score as usize)).size(26.0).color(TEXT).strong(),
-            );
-            // The found-words panel does not fit on a phone; the count does.
-            cols[0].label(egui::RichText::new(format!("{} found", self.game.found.len())).size(11.0).color(MUTED));
-
-            cols[1].add_space(4.0);
-            rank_label(&mut cols[1], league, 14.0);
-            let (label, color) = self.link_label();
-            cols[1].label(egui::RichText::new(label).size(11.0).color(color).strong());
-
-            // Leaving is right there in the bar, not below the fold.
+            // During a round, LEAVE takes the top left and the name gives way; the
+            // name is on the home screen.
+            let (score_col, rank_col) = if playing { (1, 2) } else { (0, 1) };
             if playing {
-                cols[2].with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    leave = action_button(ui, "LEAVE", RED).clicked();
-                });
+                cols[0].add_space(2.0);
+                leave = action_button(&mut cols[0], "LEAVE", RED).clicked();
             } else {
-                let name = self.identity.as_ref().map(|i| i.name.as_str()).unwrap_or("");
-                cols[2].label(egui::RichText::new(name).size(13.0).color(TEXT).strong());
+                cols[2].label(egui::RichText::new(&name).size(13.0).color(TEXT).strong());
             }
+
+            cols[score_col].label(egui::RichText::new(&score).size(26.0).color(TEXT).strong());
+            // The found-words panel does not fit on a phone; the count does.
+            cols[score_col].label(egui::RichText::new(&found).size(11.0).color(MUTED));
+
+            cols[rank_col].add_space(4.0);
+            rank_label(&mut cols[rank_col], league, 14.0);
+            cols[rank_col].label(egui::RichText::new(&link).size(11.0).color(link_color).strong());
         });
         if leave {
             self.confirm_leave = true;
@@ -704,8 +705,8 @@ impl WordLegendApp {
 
     fn board_area(&mut self, ui: &mut egui::Ui) {
         const PILL_H: f32 = 44.0;
-        /// The theme, the letter bonus and its key, the hint, and Leave.
-        const BELOW_H: f32 = 22.0 + 20.0 + 18.0 + 20.0 + 32.0;
+        /// The theme, the letter bonus and its key, and the hint.
+        const BELOW_H: f32 = 22.0 + 20.0 + 18.0 + 20.0;
         const GAP: f32 = 12.0;
 
         let avail = ui.available_size();
@@ -748,13 +749,6 @@ impl WordLegendApp {
                 "Drag across touching letters — or click them one by one, then Enter"
             };
             ui.label(egui::RichText::new(hint).size(12.0).color(MUTED));
-
-            if self.game.phase == Phase::Playing {
-                ui.add_space(4.0);
-                if action_button(ui, "Leave round", RED).clicked() {
-                    self.confirm_leave = true;
-                }
-            }
         });
     }
 
@@ -2512,12 +2506,19 @@ fn short_number(n: u32) -> String {
 fn action_button(ui: &mut egui::Ui, label: &str, fill: Color32) -> egui::Response {
     let narrow = is_narrow(ui.ctx());
     let (height, size) = if narrow { (44.0, 15.0) } else { (36.0, 14.0) };
-    ui.add(
+    // Sized to its label plus padding and laid out at exactly that size, so the
+    // label sits in the middle: a button merely given a minimum width draws its
+    // label at the left edge.
+    let text_width = ui.fonts(|f| {
+        f.layout_no_wrap(label.to_string(), FontId::proportional(size), TEXT).size().x
+    });
+    let width = (text_width + 40.0).max(96.0);
+    ui.add_sized(
+        [width, height],
         egui::Button::new(egui::RichText::new(label).size(size).color(Color32::WHITE).strong())
             .fill(fill)
             .stroke(Stroke::new(1.0_f32, fill.gamma_multiply(1.3)))
-            .corner_radius(height / 2.0)
-            .min_size(Vec2::new(96.0, height)),
+            .corner_radius(height / 2.0),
     )
     .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -3487,6 +3488,23 @@ mod tests {
             assert!(!texts.iter().any(|t| t.ends_with(" avg") && t.starts_with("Rank")), "the bar still shows the average");
             let bar_leave = text_centre(&shapes, "LEAVE").expect("a LEAVE button in the bar");
             assert!(bar_leave.y < 130.0, "LEAVE is not in the bar at the top at {size:?}: {bar_leave:?}");
+            assert!(bar_leave.x < size.x / 3.0, "LEAVE is not at the left of the bar at {size:?}: {bar_leave:?}");
+            let leaves = texts.iter().filter(|t| t.eq_ignore_ascii_case("leave") || *t == "Leave round").count();
+            assert_eq!(leaves, 1, "there should be exactly one way to leave on screen at {size:?}");
+
+            // Its label is centred on the button.
+            let button = shapes
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Rect(r) if r.fill == RED && r.rect.contains(bar_leave) => Some(r.rect),
+                    _ => None,
+                })
+                .next()
+                .expect("LEAVE is not a filled button");
+            assert!(
+                (button.center().x - bar_leave.x).abs() < 2.0 && (button.center().y - bar_leave.y).abs() < 2.0,
+                "LEAVE's label is off centre at {size:?}: label {bar_leave:?}, button {button:?}"
+            );
 
             // Leave round: a confirmation first, nothing banked yet.
             click(&mut app, &ctx, screen, bar_leave);
@@ -3502,7 +3520,7 @@ mod tests {
 
             // Leave for real: banked, and home.
             let shapes = run_frames_on(&mut app, &ctx, size, 2);
-            click(&mut app, &ctx, screen, text_centre(&shapes, "Leave round").unwrap());
+            click(&mut app, &ctx, screen, text_centre(&shapes, "LEAVE").unwrap());
             let shapes = run_frames_on(&mut app, &ctx, size, 4);
             click(&mut app, &ctx, screen, text_centre(&shapes, "LEAVE ROUND").unwrap());
             assert_eq!(app.game.phase, Phase::Ready, "leaving did not go home at {size:?}");
