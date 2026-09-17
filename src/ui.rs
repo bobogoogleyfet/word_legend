@@ -38,6 +38,14 @@ enum ResultsTab {
     Words,
 }
 
+/// A letter tapped on the scorecard's board: the words that run through it, and
+/// which one's path is drawn on the board.
+struct LetterFocus {
+    at: Position,
+    words: Vec<(String, Vec<Position>)>,
+    shown: Option<usize>,
+}
+
 /// First-run screen state, kept out of the app struct's main body.
 struct Signup {
     pending: Option<Identity>,
@@ -111,6 +119,8 @@ pub struct WordLegendApp {
     results_tab: ResultsTab,
     /// The stats page is open.
     show_stats: bool,
+    /// A letter tapped on the scorecard's board, if any.
+    letter_focus: Option<LetterFocus>,
     /// Where the cursor was last frame, so a drag can be traced as a segment
     /// rather than sampled as isolated points.
     drag_from: Option<Pos2>,
@@ -144,6 +154,7 @@ impl WordLegendApp {
             identity,
             results_tab: ResultsTab::Leaderboard,
             show_stats: false,
+            letter_focus: None,
             drag_from: None,
             elapsed: 0.0,
             code_copied_at: None,
@@ -215,6 +226,7 @@ impl WordLegendApp {
         if self.game.phase == Phase::Playing {
             self.show_stats = false;
             self.results_tab = ResultsTab::Leaderboard;
+            self.letter_focus = None;
         }
 
         match self.game.phase {
@@ -1087,7 +1099,7 @@ impl WordLegendApp {
                 Some(round) if narrow => {
                     app.stacked(ui, |app, ui| app.leaderboard(ui, round));
                     ui.add_space(12.0);
-                    app.stacked(ui, |app, ui| app.word_list_columns(ui, 130.0));
+                    app.stacked(ui, |app, ui| app.word_area(ui, 130.0));
                     ui.add_space(18.0);
                     let left = app.game.results_left.max(0.0);
                     ui.label(
@@ -1106,7 +1118,7 @@ impl WordLegendApp {
                         ui.add_space(16.0);
                         ui.vertical(|ui| {
                             ui.set_width((ui.available_width()).max(200.0));
-                            app.word_list_columns(ui, 130.0);
+                            app.word_area(ui, 130.0);
                         });
                     });
                     ui.add_space(18.0);
@@ -1121,7 +1133,7 @@ impl WordLegendApp {
                     );
                 }
                 None => {
-                    app.word_list_columns(ui, 130.0);
+                    app.word_area(ui, 130.0);
                     ui.add_space(18.0);
                     if big_button(ui, "NEXT ROUND", ACCENT) {
                         app.live.play_now(&mut app.game, app.now);
@@ -1191,7 +1203,10 @@ impl WordLegendApp {
         ui.separator();
 
         let list_height = (ui.available_height() - FOOTER).max(80.0);
-        match (self.current_tab(), self.game.round) {
+        if self.letter_focus.is_some() {
+            self.letter_words(ui, list_height);
+        } else {
+            match (self.current_tab(), self.game.round) {
             (ResultsTab::Leaderboard, Some(round)) => {
                 egui::ScrollArea::vertical()
                     .id_salt("results_players")
@@ -1201,6 +1216,7 @@ impl WordLegendApp {
                     .show(ui, |ui| self.leaderboard_rows(ui, round));
             }
             _ => self.word_list_columns(ui, list_height),
+        }
         }
 
         ui.add_space(6.0);
@@ -1261,6 +1277,78 @@ impl WordLegendApp {
         match self.results_tab {
             ResultsTab::Leaderboard if self.game.round.is_none() => ResultsTab::Words,
             tab => tab,
+        }
+    }
+
+    /// The scorecard's word area: a tapped letter's words when there is one,
+    /// otherwise the three lists.
+    fn word_area(&mut self, ui: &mut egui::Ui, height: f32) {
+        if self.letter_focus.is_some() {
+            self.letter_words(ui, height);
+        } else {
+            self.word_list_columns(ui, height);
+        }
+    }
+
+    /// Every word through the tapped letter, found ones in green, in columns that
+    /// scroll together. Tap a word to draw its path on the board.
+    fn letter_words(&mut self, ui: &mut egui::Ui, height: f32) {
+        const HEADER: f32 = 26.0;
+        let Some(focus) = self.letter_focus.as_ref() else { return };
+        let letter = capitalize(self.game.grid[focus.at.row][focus.at.col].letters);
+        let found = focus.words.iter().filter(|(w, _)| self.game.has_found(w)).count();
+
+        let mut close = false;
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("Words through {letter}  ({found}/{})", focus.words.len()))
+                    .size(12.0)
+                    .color(TEXT)
+                    .strong(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                close = ui.button(egui::RichText::new("Back to lists").size(11.0)).clicked();
+            });
+        });
+        ui.separator();
+        if close {
+            self.letter_focus = None;
+            return;
+        }
+
+        let body = (height - HEADER).max(40.0);
+        let mut picked = None;
+        egui::ScrollArea::vertical()
+            .id_salt("letter_words")
+            .max_height(body)
+            .min_scrolled_height(body)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let focus = self.letter_focus.as_ref().expect("checked above");
+                if focus.words.is_empty() {
+                    ui.label(egui::RichText::new("No word on this board uses that letter.").size(12.0).color(MUTED));
+                    return;
+                }
+                ui.label(egui::RichText::new("Tap a word to see how it runs.").size(11.0).color(MUTED));
+                let columns = ((ui.available_width() / 120.0).floor() as usize).clamp(1, 4);
+                let per_column = focus.words.len().div_ceil(columns);
+                ui.columns(columns, |cols| {
+                    for (i, (word, _)) in focus.words.iter().enumerate() {
+                        let col = &mut cols[i / per_column];
+                        col.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                        let found = self.game.has_found(word);
+                        let shown = focus.shown == Some(i);
+                        let text = egui::RichText::new(format!("{word}  {}", crate::game::word_points(word.len())))
+                            .size(12.0)
+                            .color(if found { GREEN } else { TEXT });
+                        if col.selectable_label(shown, text).clicked() {
+                            picked = Some(if shown { None } else { Some(i) });
+                        }
+                    }
+                });
+            });
+        if let (Some(choice), Some(focus)) = (picked, self.letter_focus.as_mut()) {
+            focus.shown = choice;
         }
     }
 
@@ -1381,9 +1469,31 @@ impl WordLegendApp {
     }
 
     /// The played board, with each tile bordered by how hard it worked.
-    fn used_board(&self, ui: &mut egui::Ui, size: f32) {
-        let (response, painter) = ui.allocate_painter(Vec2::splat(size), Sense::hover());
+    /// The played board. Tap a letter to see every word that runs through it.
+    fn used_board(&mut self, ui: &mut egui::Ui, size: f32) {
+        let (response, painter) = ui.allocate_painter(Vec2::splat(size), Sense::click());
         let geom = BoardGeometry::new(response.rect.min, size);
+
+        if response.clicked() {
+            if let Some(at) = response.interact_pointer_pos().and_then(|p| geom.tile_at(p)) {
+                // The same letter again puts the lists back.
+                if self.letter_focus.as_ref().is_some_and(|f| f.at == at) {
+                    self.letter_focus = None;
+                } else {
+                    self.letter_focus = Some(LetterFocus { at, words: self.game.words_through(at), shown: None });
+                }
+            }
+        }
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        let _ = response;
+
+        // The path of the word picked from the letter's list, under the tiles.
+        if let Some(path) = self.letter_focus.as_ref().and_then(|f| f.shown.map(|i| &f.words[i].1)) {
+            let centres: Vec<Pos2> = path.iter().map(|p| geom.center(*p)).collect();
+            for pair in centres.windows(2) {
+                painter.line_segment([pair[0], pair[1]], Stroke::new(size * 0.04, ACCENT.gamma_multiply(0.8)));
+            }
+        }
 
         for row in 0..SIZE {
             for col in 0..SIZE {
@@ -1407,6 +1517,9 @@ impl WordLegendApp {
                     if uses == 0 { MUTED } else { TEXT },
                 );
                 use_stars(&painter, rect, uses);
+                if self.letter_focus.as_ref().is_some_and(|f| f.at == at) {
+                    painter.rect_stroke(rect.expand(2.0), rect.width() * 0.2, Stroke::new(3.0_f32, GOLD), egui::StrokeKind::Outside);
+                }
             }
         }
 
@@ -2936,6 +3049,85 @@ mod tests {
             let obscure_after = find(&shapes, "obscure00").expect("obscure00 still drawn").min.y;
             assert!(common_after < common_first.min.y - 50.0, "the Common column did not scroll at {size:?}");
             assert!((obscure_after - obscure_first.min.y).abs() < 1.0, "scrolling Common moved Obscure too at {size:?}");
+        }
+    }
+
+    /// Tapping a letter on the scorecard's board lists the words through it, and
+    /// tapping one of those draws its path.
+    #[test]
+    fn tapping_a_scorecard_letter_lists_its_words_and_shows_their_paths() {
+        for size in [PHONES[0], Vec2::new(1000.0, 780.0)] {
+            let mut app = offline_app(true);
+            app.game.start_round();
+            app.game.grid = std::array::from_fn(|r| {
+                std::array::from_fn(|c| crate::game::Cell { letters: ["c", "a", "t", "s", "h", "e", "r", "o", "m", "i", "n", "d", "p", "l", "u", "g"][r * SIZE + c] })
+            });
+            app.game.words = crate::game::solve_board(&app.game.dictionary, &app.game.grid);
+            app.game.score = 100;
+            app.game.time_left = 0.0;
+            app.game.tick(0.2);
+
+            let ctx = egui::Context::default();
+            let screen = Rect::from_min_size(Pos2::ZERO, size);
+            let frame = |app: &mut WordLegendApp, events: Vec<egui::Event>| {
+                let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+                painted(ctx.run(input, |ctx| app.frame(ctx)).shapes)
+            };
+            let mut shapes = Vec::new();
+            for _ in 0..12 {
+                shapes = frame(&mut app, vec![]);
+            }
+
+            // The scorecard's small board: its tiles are the small TILE squares.
+            let mut small: Vec<Rect> = shapes
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Rect(r) if r.fill == TILE && r.rect.width() < 60.0 && (r.rect.width() - r.rect.height()).abs() < 1.0 => Some(r.rect),
+                    _ => None,
+                })
+                .collect();
+            small.sort_by(|a, b| (a.min.y, a.min.x).partial_cmp(&(b.min.y, b.min.x)).unwrap());
+            assert_eq!(small.len(), 16, "expected the scorecard board at {size:?}");
+            let a_tile = small[1].center(); // the A in CATS
+
+            let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+            frame(&mut app, vec![egui::Event::PointerMoved(a_tile), button(a_tile, true)]);
+            frame(&mut app, vec![button(a_tile, false)]);
+            for _ in 0..3 {
+                shapes = frame(&mut app, vec![]);
+            }
+            let focus = app.letter_focus.as_ref().expect("tapping a letter did nothing");
+            assert_eq!(focus.at, Position { row: 0, col: 1 });
+            let texts = texts_of(&shapes);
+            assert!(texts.iter().any(|t| t.starts_with("Words through A")), "no heading for the letter at {size:?}");
+            assert!(focus.words.iter().any(|(w, _)| w == "cats"), "CATS is not among the words through A");
+            // Longest first, so the first entry is the one on screen to tap.
+            let (first, _) = focus.words[0].clone();
+            let label = format!("{first}  {}", crate::game::word_points(first.len()));
+            assert!(texts.iter().any(|t| *t == label), "{label:?} is not listed at {size:?}");
+            assert_fits("letter words", &shapes, size);
+
+            // Tap it: its path is drawn over the small board.
+            let cats = shapes
+                .iter()
+                .find_map(|s| match s {
+                    egui::Shape::Text(t) if t.galley.job.text == label => Some(s.visual_bounding_rect().center()),
+                    _ => None,
+                })
+                .unwrap();
+            let before = shapes.iter().filter(|s| matches!(s, egui::Shape::LineSegment { .. })).count();
+            frame(&mut app, vec![egui::Event::PointerMoved(cats), button(cats, true)]);
+            frame(&mut app, vec![button(cats, false)]);
+            shapes = frame(&mut app, vec![]);
+            let shown = app.letter_focus.as_ref().and_then(|f| f.shown.map(|i| f.words[i].0.clone()));
+            assert_eq!(shown.as_deref(), Some(first.as_str()), "tapping the word did not pick it at {size:?}");
+            let after = shapes.iter().filter(|s| matches!(s, egui::Shape::LineSegment { .. })).count();
+            assert!(after >= before + first.len() - 1, "{first}'s path was not drawn at {size:?}");
+
+            // Tapping the letter again goes back to the lists.
+            frame(&mut app, vec![egui::Event::PointerMoved(a_tile), button(a_tile, true)]);
+            frame(&mut app, vec![button(a_tile, false)]);
+            assert!(app.letter_focus.is_none(), "the same letter did not close its list at {size:?}");
         }
     }
 

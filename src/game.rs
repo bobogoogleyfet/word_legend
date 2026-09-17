@@ -464,6 +464,23 @@ impl Game {
         }
     }
 
+    /// Every word on the board -- common and obscure -- that can be traced through
+    /// `at`, each with one such path, longest words first. The scorecard shows
+    /// these when a letter is tapped, so a player can see what a letter was good
+    /// for and how each word runs.
+    pub fn words_through(&self, at: Position) -> Vec<(String, Vec<Position>)> {
+        let mut out: Vec<(String, Vec<Position>)> = self
+            .words
+            .common
+            .iter()
+            .chain(self.words.obscure.iter())
+            .filter_map(|word| path_through(&self.grid, word, at).map(|path| (word.clone(), path)))
+            .collect();
+        out.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+        out.dedup_by(|a, b| a.0 == b.0);
+        out
+    }
+
     /// The words found this round, in the order they were found.
     pub fn found_words(&self) -> Vec<String> {
         self.found.iter().map(|w| w.word.clone()).collect()
@@ -511,6 +528,52 @@ pub fn parse_grid(tiles: &[String]) -> Option<[[Cell; SIZE]; SIZE]> {
         cells.push(Cell { letters });
     }
     Some(std::array::from_fn(|row| std::array::from_fn(|col| cells[row * SIZE + col])))
+}
+
+/// A path spelling `word` across `grid` that passes through `through`, if any.
+pub fn path_through(grid: &[[Cell; SIZE]; SIZE], word: &str, through: Position) -> Option<Vec<Position>> {
+    fn step(
+        grid: &[[Cell; SIZE]; SIZE],
+        rest: &str,
+        at: Position,
+        through: Position,
+        path: &mut Vec<Position>,
+    ) -> bool {
+        if path.contains(&at) {
+            return false;
+        }
+        let Some(tail) = rest.strip_prefix(grid[at.row][at.col].letters) else { return false };
+        path.push(at);
+        if tail.is_empty() {
+            if path.contains(&through) {
+                return true;
+            }
+        } else {
+            for dr in -1i32..=1 {
+                for dc in -1i32..=1 {
+                    let (r, c) = (at.row as i32 + dr, at.col as i32 + dc);
+                    if (dr, dc) != (0, 0) && (0..SIZE as i32).contains(&r) && (0..SIZE as i32).contains(&c) {
+                        let next = Position { row: r as usize, col: c as usize };
+                        if step(grid, tail, next, through, path) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        path.pop();
+        false
+    }
+
+    let mut path = Vec::with_capacity(word.len());
+    for row in 0..SIZE {
+        for col in 0..SIZE {
+            if step(grid, word, Position { row, col }, through, &mut path) {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 pub fn is_adjacent(a: Position, b: Position) -> bool {
@@ -853,6 +916,29 @@ mod tests {
         }
         (0..SIZE).flat_map(|r| (0..SIZE).map(move |c| Position { row: r, col: c }))
             .any(|start| step(grid, word, start, 0))
+    }
+
+    #[test]
+    fn a_letter_lists_exactly_the_words_that_run_through_it() {
+        let mut game = Game::new();
+        game.grid = board(["cats", "zazz", "zzzz", "zzzz"]);
+        game.words = solve_board(&game.dictionary, &game.grid);
+
+        let t = Position { row: 0, col: 2 };
+        let through_t = game.words_through(t);
+        let words: Vec<&str> = through_t.iter().map(|(w, _)| w.as_str()).collect();
+        assert!(words.contains(&"cats") && words.contains(&"cat"), "missing words through T: {words:?}");
+
+        for (word, path) in &through_t {
+            assert!(path.contains(&t), "{word}'s path skips the tapped letter");
+            let spelled: String = path.iter().map(|p| game.grid[p.row][p.col].letters).collect();
+            assert_eq!(&spelled, word, "the path does not spell the word");
+            assert!(path.windows(2).all(|w| is_adjacent(w[0], w[1])), "{word}'s path jumps");
+        }
+
+        // A word that never touches the tile is not listed: nothing here reaches
+        // the bottom corner.
+        assert!(game.words_through(Position { row: 3, col: 3 }).is_empty());
     }
 
     #[test]
