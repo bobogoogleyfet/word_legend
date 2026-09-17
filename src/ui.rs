@@ -1191,19 +1191,7 @@ impl WordLegendApp {
             ui.label(egui::RichText::new("avg").size(12.0).color(MUTED));
         });
 
-        // Recent rounds as bars, newest on the right.
-        let peak = rank.recent.iter().copied().max().unwrap_or(1).max(1);
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());
-        let painter = ui.painter();
-        let slot = rect.width() / FORM_GAMES as f32;
-        for (i, score) in rank.recent.iter().enumerate() {
-            let height = (*score as f32 / peak as f32) * rect.height();
-            let bar = Rect::from_min_size(
-                Pos2::new(rect.min.x + i as f32 * slot, rect.max.y - height.max(2.0)),
-                Vec2::new((slot - 3.0).max(2.0), height.max(2.0)),
-            );
-            painter.rect_filled(bar, 2.0, league_color(rank.league).gamma_multiply(0.8));
-        }
+        self.form_line(ui);
 
         ui.add_space(6.0);
 
@@ -1246,6 +1234,107 @@ impl WordLegendApp {
                 .size(11.0)
                 .color(AMBER),
             );
+        }
+    }
+
+    /// The last ten rounds as a line, newest on the right, against a hairline at
+    /// their average -- the number the ladder actually uses. Hovering picks out a
+    /// round and reads it off.
+    fn form_line(&self, ui: &mut egui::Ui) {
+        const HEIGHT: f32 = 46.0;
+        /// Room at the right for the average line's label, clear of the plot.
+        const LABEL_GUTTER: f32 = 30.0;
+        /// Markers are 8px across plus a ring; keep them inside the plot.
+        const PAD: f32 = 6.0;
+
+        let rank = &self.game.ranking;
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), HEIGHT), Sense::hover());
+        let plot = Rect::from_min_max(
+            rect.min + Vec2::new(PAD, PAD),
+            Pos2::new(rect.max.x - LABEL_GUTTER, rect.max.y - PAD),
+        );
+        let painter = ui.painter();
+        let grid = Stroke::new(1.0_f32, TILE_EDGE);
+        let color = league_color(rank.league);
+
+        // The baseline is zero, so a line's height is an honest share of the best.
+        painter.line_segment([plot.left_bottom(), plot.right_bottom()], grid);
+
+        let scores: Vec<u32> = rank.recent.iter().copied().collect();
+        if scores.is_empty() {
+            painter.text(
+                plot.center(),
+                Align2::CENTER_CENTER,
+                "Your rounds will chart here",
+                FontId::proportional(11.0),
+                MUTED,
+            );
+            return;
+        }
+
+        let average = rank.average();
+        let peak = scores.iter().copied().max().unwrap_or(0).max(average).max(1) as f32;
+        let y = |score: u32| plot.max.y - (score as f32 / peak) * plot.height();
+        // Fixed slots, filled from the right: the newest round always sits at the
+        // right edge, and the line grows leftward until there are ten.
+        let step = plot.width() / (FORM_GAMES - 1) as f32;
+        let first_slot = FORM_GAMES - scores.len();
+        let points: Vec<Pos2> = scores
+            .iter()
+            .enumerate()
+            .map(|(i, s)| Pos2::new(plot.min.x + (first_slot + i) as f32 * step, y(*s)))
+            .collect();
+
+        // The average, as a recessive solid hairline with its label in the gutter.
+        let avg_y = y(average);
+        painter.line_segment([Pos2::new(plot.min.x, avg_y), Pos2::new(plot.max.x, avg_y)], grid);
+        painter.text(
+            Pos2::new(rect.max.x, avg_y),
+            Align2::RIGHT_CENTER,
+            "avg",
+            FontId::proportional(10.0),
+            MUTED,
+        );
+
+        // Nearest round to the pointer, by x: readers aim at a round, not a 2px line.
+        let hovered = response.hover_pos().map(|p| {
+            let slot = ((p.x - plot.min.x) / step).round().clamp(first_slot as f32, (FORM_GAMES - 1) as f32);
+            slot as usize - first_slot
+        });
+        if let Some(i) = hovered {
+            let x = points[i].x;
+            painter.line_segment([Pos2::new(x, plot.min.y), Pos2::new(x, plot.max.y)], grid);
+        }
+
+        if points.len() > 1 {
+            painter.add(egui::Shape::line(points.clone(), Stroke::new(2.0_f32, color)));
+        }
+        for (i, at) in points.iter().enumerate() {
+            let radius = if hovered == Some(i) { 5.0 } else { 4.0 };
+            // A ring in the panel colour keeps each marker legible where it sits on
+            // the line or the average.
+            painter.circle(*at, radius, color, Stroke::new(2.0_f32, PANEL));
+        }
+
+        if let Some(i) = hovered {
+            let ago = scores.len() - 1 - i;
+            let when = match ago {
+                0 => "Last round".to_string(),
+                1 => "1 round ago".to_string(),
+                n => format!("{n} rounds ago"),
+            };
+            response.on_hover_ui_at_pointer(|ui| {
+                ui.label(egui::RichText::new(when).size(11.0).color(MUTED));
+                ui.label(
+                    egui::RichText::new(thousands(scores[i] as usize)).size(14.0).color(TEXT).strong(),
+                );
+                ui.label(
+                    egui::RichText::new(format!("avg {}", thousands(average as usize)))
+                        .size(11.0)
+                        .color(MUTED),
+                );
+            });
         }
     }
 
@@ -1683,6 +1772,103 @@ mod tests {
             });
             assert!(pill, "the disabled button is not the usual pill (restoring: {restoring})");
         }
+    }
+
+    /// Lay out the rank panel on its own, as the start card shows it.
+    fn form_panel_frame(app: &WordLegendApp, ctx: &egui::Context, events: Vec<egui::Event>) -> Vec<egui::Shape> {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0));
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        painted(
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.set_width(340.0);
+                    app.form_panel(ui);
+                });
+            })
+            .shapes,
+        )
+    }
+
+    #[test]
+    fn the_last_ten_rounds_are_a_line_not_bars() {
+        let mut app = WordLegendApp::new();
+        for score in [1_000, 4_000, 2_500, 6_000, 3_000, 5_500, 7_000] {
+            app.game.ranking.record(score);
+        }
+        let color = league_color(app.game.ranking.league);
+        let ctx = egui::Context::default();
+        let shapes = form_panel_frame(&app, &ctx, vec![]);
+
+        // One 2px path through every round, in the league colour.
+        let lines: Vec<&egui::epaint::PathShape> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Path(p) if p.stroke.width == 2.0 => Some(p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), 1, "expected one line, got {}", lines.len());
+        assert_eq!(lines[0].points.len(), 7);
+
+        // Newest on the right, and a higher score sits higher on screen.
+        let points = &lines[0].points;
+        assert!(points.windows(2).all(|w| w[1].x > w[0].x), "rounds out of order");
+        assert!(points[6].y < points[0].y, "7,000 should plot above 1,000");
+
+        // A marker per round, and nothing drawn as a bar.
+        let markers = shapes
+            .iter()
+            .filter(|s| matches!(s, egui::Shape::Circle(c) if c.fill == color))
+            .count();
+        assert_eq!(markers, 7);
+        let bars = shapes.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.fill == color.gamma_multiply(0.8)));
+        assert!(!bars, "the old bars are still drawn");
+
+        // The average is on the chart as a labelled hairline.
+        let labelled = shapes.iter().any(|s| matches!(s, egui::Shape::Text(t) if t.galley.job.text == "avg"));
+        assert!(labelled, "the average line has no label");
+    }
+
+    #[test]
+    fn hovering_the_line_reads_off_a_round() {
+        let mut app = WordLegendApp::new();
+        for score in [2_000, 9_000, 3_000] {
+            app.game.ranking.record(score);
+        }
+        let ctx = egui::Context::default();
+        let shapes = form_panel_frame(&app, &ctx, vec![]);
+        let line = shapes
+            .iter()
+            .find_map(|s| match s {
+                egui::Shape::Path(p) if p.stroke.width == 2.0 => Some(p.points.clone()),
+                _ => None,
+            })
+            .expect("a line");
+
+        // Aim near, not on, the middle round: the nearest one should be picked.
+        let aim = line[1] + Vec2::new(6.0, 12.0);
+        form_panel_frame(&app, &ctx, vec![egui::Event::PointerMoved(aim)]);
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            texts = form_panel_frame(&app, &ctx, vec![egui::Event::PointerMoved(aim)])
+                .into_iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) => Some(t.galley.job.text.clone()),
+                    _ => None,
+                })
+                .collect();
+        }
+        assert!(texts.iter().any(|t| t == "1 round ago"), "no readout for the hovered round: {texts:?}");
+        assert!(texts.iter().any(|t| t == "9,000"), "hovered round's score missing: {texts:?}");
+    }
+
+    #[test]
+    fn an_empty_record_says_where_the_line_will_go() {
+        let app = WordLegendApp::new();
+        let ctx = egui::Context::default();
+        let shapes = form_panel_frame(&app, &ctx, vec![]);
+        assert!(shapes.iter().any(|s| matches!(s, egui::Shape::Text(t) if t.galley.job.text == "Your rounds will chart here")));
+        assert!(!shapes.iter().any(|s| matches!(s, egui::Shape::Path(_))));
     }
 
     #[test]
