@@ -182,6 +182,14 @@ impl Dictionary {
         }
     }
 
+    /// A word in the common tier. Everything else the dictionary accepts is
+    /// obscure, and scores a little more for being found.
+    pub fn is_common(&self, word: &str) -> bool {
+        let word = word.to_ascii_lowercase();
+        self.step_str(self.root(), &word)
+            .is_some_and(|node| self.is_word_node(node) && self.is_common_node(node))
+    }
+
     pub fn word_count(&self) -> usize {
         self.word_count
     }

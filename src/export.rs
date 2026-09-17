@@ -34,10 +34,13 @@ fn round_json(dict: &Dictionary, themes: &Themes, superwords: &[String], round: 
         .map(|(r, c)| format!("\"{}\"", grid[r][c].letters))
         .collect();
 
-    // Everything that scores: both tiers, since both are playable.
-    let mut valid: Vec<&String> = words.common.iter().chain(words.obscure.iter()).collect();
-    valid.sort();
-    let words_json: Vec<String> = valid.iter().map(|w| format!("\"{w}\"")).collect();
+    // Everything that scores, by tier: both are playable, and obscure words score
+    // 10% more, so the server has to know which is which.
+    let listed = |list: &[String]| {
+        let mut sorted: Vec<&String> = list.iter().collect();
+        sorted.sort();
+        sorted.iter().map(|w| format!("\"{w}\"")).collect::<Vec<_>>().join(",")
+    };
 
     let theme_json = match &theme {
         Some(name) => format!("\"{name}\""),
@@ -47,9 +50,10 @@ fn round_json(dict: &Dictionary, themes: &Themes, superwords: &[String], round: 
     let mut out = String::new();
     let _ = write!(
         out,
-        "{{\"round\":{round},\"grid\":[{}],\"theme\":{theme_json},\"words\":[{}]}}",
+        "{{\"round\":{round},\"grid\":[{}],\"theme\":{theme_json},\"words\":[{}],\"obscure\":[{}]}}",
         tiles.join(","),
-        words_json.join(",")
+        listed(&words.common),
+        listed(&words.obscure)
     );
     out
 }
@@ -116,6 +120,7 @@ mod tests {
         assert!(json.contains("\"round\":2"));
         assert!(json.contains("\"grid\":["));
         assert!(json.contains("\"words\":["));
+        assert!(json.contains("\"obscure\":["), "obscure words must be listed apart, for their bonus");
         // Sixteen tiles, quoted and comma separated.
         let grid_start = json.find("\"grid\":[").unwrap() + 8;
         let grid_end = json[grid_start..].find(']').unwrap() + grid_start;

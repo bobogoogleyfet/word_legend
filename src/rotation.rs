@@ -1,11 +1,9 @@
 //! What kind of board each round gets, and building it.
 //!
-//! The mix is curated rather than rolled. In every block of ten rounds exactly
-//! one is a superword board, at a position that varies from block to block, and
-//! the other nine are themed. Themes rotate evenly and never back to back. Left to
-//! chance, a one-in-ten board can go thirty rounds without showing up and then
-//! come twice in a row; scheduled, it arrives every ten rounds without being
-//! predictable within them.
+//! The mix is curated rather than rolled. Every fifth round is a superword board,
+//! and the four between are themed. Themes rotate evenly and never back to back.
+//! Left to chance, a one-in-five board can go twenty rounds without showing up
+//! and then come twice in a row; scheduled, it is always the fifth.
 //!
 //! - A **superword board** is built around one word that fills all sixteen tiles.
 //!   The word is laid along a path through every tile, so the whole board is that
@@ -31,8 +29,8 @@ pub type Grid = [[Cell; SIZE]; SIZE];
 /// A themed board must hold at least this many words from its category.
 pub const THEME_WORDS_REQUIRED: usize = 20;
 
-/// One board in this many is a superword board.
-pub const SUPERWORD_EVERY: u64 = 10;
+/// Every this-many-th round is a superword board.
+pub const SUPERWORD_EVERY: u64 = 5;
 
 /// Themes that can reliably reach [`THEME_WORDS_REQUIRED`] on one board, in the
 /// order they rotate. Measured by searching each theme's best board: these reach
@@ -77,24 +75,20 @@ fn mix(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-/// Where in its block of ten the superword round falls.
-fn superword_position(block: u64) -> u64 {
-    mix(block ^ 0x5355_5045_5257_4F52) % SUPERWORD_EVERY
-}
 
 /// The board kind for a round slot.
 pub fn kind_for_slot(slot: u64, superwords: &[String]) -> RoundKind {
     let block = slot / SUPERWORD_EVERY;
-    let position = superword_position(block);
     let within = slot % SUPERWORD_EVERY;
 
-    if within == position {
+    // The last round of each block of five: rounds 5, 10, 15, counting from one.
+    if within == SUPERWORD_EVERY - 1 {
         return RoundKind::Superword(superword_for_block(block, superwords));
     }
 
-    // How many themed rounds came before this one: nine per whole block, plus the
-    // themed slots earlier in this block.
-    let themed_before = block * (SUPERWORD_EVERY - 1) + within - u64::from(within > position);
+    // How many themed rounds came before this one: four per whole block, plus the
+    // themed rounds earlier in this block.
+    let themed_before = block * (SUPERWORD_EVERY - 1) + within;
     RoundKind::Themed(theme_at(themed_before).to_string())
 }
 
@@ -365,30 +359,24 @@ pub fn build_theme_board(dict: &Dictionary, theme: &Theme, rng: &mut StdRng) -> 
 
 /// Board kinds for solo play, when there is no server to serve rounds.
 ///
-/// Solo keeps the curated one-in-ten superword board. Its other rounds are plain:
+/// Solo keeps a superword board every fifth round. Its other rounds are plain:
 /// a themed board takes seconds of searching, which on a phone would freeze the
 /// game at the start of every round.
 pub struct SoloRotation {
     played: u64,
-    position: u64,
     superwords: Vec<String>,
 }
 
 impl SoloRotation {
-    pub fn new(rng: &mut impl Rng) -> Self {
-        let superwords = superwords();
-        SoloRotation { played: rng.gen_range(0..SUPERWORD_EVERY), position: rng.gen_range(0..SUPERWORD_EVERY), superwords }
+    pub fn new(_rng: &mut impl Rng) -> Self {
+        SoloRotation { played: 0, superwords: superwords() }
     }
 
     /// The next solo board.
     pub fn next_board(&mut self, dict: &Dictionary, rng: &mut StdRng) -> (Grid, BoardWords, Option<String>) {
-        let within = self.played % SUPERWORD_EVERY;
-        if within == 0 {
-            self.position = rng.gen_range(0..SUPERWORD_EVERY);
-        }
         self.played += 1;
 
-        if within == self.position {
+        if self.played % SUPERWORD_EVERY == 0 {
             if let Some(word) = self.superwords.choose(rng).cloned() {
                 if let Some((grid, words)) = build_superword_board(dict, &word, rng) {
                     return (grid, words, None);
@@ -417,20 +405,29 @@ mod tests {
     }
 
     #[test]
-    fn exactly_one_round_in_ten_is_a_superword_board() {
+    fn every_fifth_round_is_a_superword_board() {
         let words = superwords();
-        for block in 0..300u64 {
-            let kinds: Vec<RoundKind> =
-                (block * 10..block * 10 + 10).map(|slot| kind_for_slot(slot, &words)).collect();
-            let supers = kinds.iter().filter(|k| matches!(k, RoundKind::Superword(_))).count();
-            assert_eq!(supers, 1, "block {block} has {supers} superword boards");
+        for slot in 0..3_000u64 {
+            let superword = matches!(kind_for_slot(slot, &words), RoundKind::Superword(_));
+            assert_eq!(superword, slot % 5 == 4, "slot {slot}: superword board {superword}");
         }
+        // The packs repeat every thousand rounds; five divides it, so the pattern
+        // carries across the wrap.
+        assert_eq!(1_000 % SUPERWORD_EVERY, 0);
     }
 
     #[test]
-    fn the_superword_round_moves_around_within_its_block() {
-        let positions: std::collections::HashSet<u64> = (0..100).map(superword_position).collect();
-        assert!(positions.len() >= 8, "superword rounds sit in only {} positions", positions.len());
+    fn solo_play_serves_a_superword_board_every_fifth_round() {
+        let dict = Dictionary::new();
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut solo = SoloRotation::new(&mut rng);
+        let supers: Vec<bool> = (0..10)
+            .map(|_| {
+                let (_, words, _) = solo.next_board(&dict, &mut rng);
+                words.common.iter().any(|w| word_tiles(w).is_some_and(|t| t.len() == SIZE * SIZE))
+            })
+            .collect();
+        assert_eq!(supers, [false, false, false, false, true, false, false, false, false, true]);
     }
 
     #[test]
@@ -450,13 +447,13 @@ mod tests {
                 RoundKind::Superword(_) => None,
             })
             .collect();
-        assert_eq!(themed.len(), 1_800);
+        assert_eq!(themed.len(), 1_600);
         for pair in themed.windows(2) {
             assert_ne!(pair[0], pair[1], "the same theme twice in a row");
         }
         for name in ROTATION_THEMES {
             let count = themed.iter().filter(|t| *t == name).count();
-            assert_eq!(count, 180, "{name} came up {count} times in 1800 themed rounds");
+            assert_eq!(count, 160, "{name} came up {count} times in 1600 themed rounds");
         }
     }
 

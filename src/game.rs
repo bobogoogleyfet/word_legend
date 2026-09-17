@@ -47,6 +47,13 @@ pub const MIN_LONG_SOLUTIONS: usize = 4;
 pub const LONG_WORD_LEN: usize = 6;
 /// A superword fills the whole board: one word across all sixteen tiles.
 pub const SUPERWORD_TILES: usize = SIZE * SIZE;
+/// What finding a superword is worth, whatever its length: nearly four times its
+/// length's points and more than two very good rounds, so the board built around
+/// it is worth playing for.
+pub const SUPERWORD_POINTS: u32 = 20_000;
+/// Obscure words score this many tenths of a common word's points: 10% more, for
+/// knowing them.
+const OBSCURE_TENTHS: u32 = 11;
 /// A longest word at least this long makes an unthemed board a "Long" one.
 const LONG_BOARD_LEN: usize = 10;
 /// Attempts the dictionary-free derivation makes at a board that looks playable.
@@ -347,7 +354,7 @@ impl Game {
             return;
         }
 
-        let points = word_points(word.len());
+        let points = self.word_score(&word);
         self.score += points;
         for at in &cells {
             self.tile_uses[at.row][at.col] += 1;
@@ -377,7 +384,12 @@ impl Game {
 
     /// Everything the board was worth: the score if every common word were found.
     pub fn board_par(&self) -> u32 {
-        self.words.common.iter().map(|w| word_points(w.len())).sum()
+        self.words.common.iter().map(|w| score_word(w, false)).sum()
+    }
+
+    /// What a word on this board scores, by its length and its tier.
+    pub fn word_score(&self, word: &str) -> u32 {
+        score_word(word, !self.dictionary.is_common(word))
     }
 
     pub fn found_count(&self) -> usize {
@@ -514,6 +526,22 @@ pub fn word_points(len: usize) -> u32 {
     }
 }
 
+/// What a word scores: a superword its flat bonus, anything else its length's
+/// points, with 10% more for an obscure word. The server scores submissions the
+/// same way; the two must agree or the leaderboard will not match the scorecard.
+pub fn score_word(word: &str, obscure: bool) -> u32 {
+    if crate::rotation::word_tiles(word).is_some_and(|t| t.len() >= SUPERWORD_TILES) {
+        return SUPERWORD_POINTS;
+    }
+    let points = word_points(word.len());
+    if obscure { points * OBSCURE_TENTHS / 10 } else { points }
+}
+
+/// A path spelling `word` across `grid`, if there is one.
+pub fn find_path(grid: &[[Cell; SIZE]; SIZE], word: &str) -> Option<Vec<Position>> {
+    trace(grid, word, None)
+}
+
 /// A board as the server sends it -- sixteen tiles, row by row -- in the form the
 /// game plays on. Themed boards plant any letter, so a tile is any single letter
 /// or the `qu` die; anything else is refused.
@@ -532,11 +560,16 @@ pub fn parse_grid(tiles: &[String]) -> Option<[[Cell; SIZE]; SIZE]> {
 
 /// A path spelling `word` across `grid` that passes through `through`, if any.
 pub fn path_through(grid: &[[Cell; SIZE]; SIZE], word: &str, through: Position) -> Option<Vec<Position>> {
+    trace(grid, word, Some(through))
+}
+
+/// A path spelling `word`, through `through` when one is given.
+fn trace(grid: &[[Cell; SIZE]; SIZE], word: &str, through: Option<Position>) -> Option<Vec<Position>> {
     fn step(
         grid: &[[Cell; SIZE]; SIZE],
         rest: &str,
         at: Position,
-        through: Position,
+        through: Option<Position>,
         path: &mut Vec<Position>,
     ) -> bool {
         if path.contains(&at) {
@@ -545,7 +578,7 @@ pub fn path_through(grid: &[[Cell; SIZE]; SIZE], word: &str, through: Position) 
         let Some(tail) = rest.strip_prefix(grid[at.row][at.col].letters) else { return false };
         path.push(at);
         if tail.is_empty() {
-            if path.contains(&through) {
+            if through.is_none_or(|t| path.contains(&t)) {
                 return true;
             }
         } else {
@@ -916,6 +949,42 @@ mod tests {
         }
         (0..SIZE).flat_map(|r| (0..SIZE).map(move |c| Position { row: r, col: c }))
             .any(|start| step(grid, word, start, 0))
+    }
+
+    #[test]
+    fn obscure_words_score_ten_percent_more_and_superwords_a_flat_bonus() {
+        assert_eq!(score_word("cat", false), 100);
+        assert_eq!(score_word("adit", true), 440);
+        assert_eq!(score_word("oxen", false), 400);
+        for len in 3..=12 {
+            let word = "a".repeat(len);
+            assert_eq!(score_word(&word, true), word_points(len) * 11 / 10, "{len} letters");
+            assert_eq!(word_points(len) * 11 % 10, 0, "10% more is not a whole number at {len} letters");
+        }
+        // Sixteen tiles, "qu" being one of them, whatever the tier.
+        assert_eq!(score_word("characterization", false), SUPERWORD_POINTS);
+        assert_eq!(score_word("characterization", true), SUPERWORD_POINTS);
+        assert!(SUPERWORD_POINTS > word_points(16) * 3, "a superword should be worth far more than its length");
+
+        // The game scores a found word by its tier.
+        let mut game = Game::new();
+        game.grid = board(["adit", "zzzz", "zzzz", "zzzz"]);
+        game.words = solve_board(&game.dictionary, &game.grid);
+        game.phase = Phase::Playing;
+        for col in 0..4 {
+            game.extend_path(Position { row: 0, col });
+        }
+        game.submit_path();
+        assert_eq!(game.score, 440, "an obscure word did not score 10% more");
+    }
+
+    #[test]
+    fn any_word_on_the_board_has_a_path() {
+        let grid = board(["cats", "zazz", "zzzz", "zzzz"]);
+        let path = find_path(&grid, "cats").expect("cats is on the board");
+        let spelled: String = path.iter().map(|p| grid[p.row][p.col].letters).collect();
+        assert_eq!(spelled, "cats");
+        assert!(find_path(&grid, "dogs").is_none());
     }
 
     #[test]

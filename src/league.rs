@@ -156,12 +156,11 @@ impl Ranking {
         let average = self.average();
         let from = self.league;
 
-        // Too early to judge anyone.
-        if self.recent.len() < MIN_GAMES_TO_MOVE {
-            return RankChange { movement: Movement::Held, from, to: from, average };
-        }
+        // Promotion waits for enough rounds to judge; relegation does not. An
+        // average below the league's floor drops a league straight away.
+        let can_promote = self.recent.len() >= MIN_GAMES_TO_MOVE;
 
-        if self.league < TOP_LEAGUE && average >= LEAGUES[self.league + 1].threshold {
+        if can_promote && self.league < TOP_LEAGUE && average >= LEAGUES[self.league + 1].threshold {
             self.league += 1;
             return RankChange {
                 movement: Movement::Promoted,
@@ -180,6 +179,26 @@ impl Ranking {
             };
         }
         RankChange { movement: Movement::Held, from, to: from, average }
+    }
+
+    /// The rank average after each game in the history: the mean of that game and
+    /// up to nine before it. The first game's average is its own score.
+    pub fn history_averages(&self) -> Vec<u32> {
+        let scores: Vec<u64> = self.history.iter().map(|g| u64::from(g.score)).collect();
+        (0..scores.len())
+            .map(|i| {
+                let window = &scores[(i + 1).saturating_sub(FORM_GAMES)..=i];
+                (window.iter().sum::<u64>() / window.len() as u64) as u32
+            })
+            .collect()
+    }
+
+    /// A league the average no longer holds up is left: one league at a time,
+    /// until the average is at or above the league's floor.
+    fn settle_league(&mut self) {
+        while self.league > 0 && !self.recent.is_empty() && self.average() < LEAGUES[self.league].threshold {
+            self.league -= 1;
+        }
     }
 
     pub fn next_threshold(&self) -> Option<u32> {
@@ -251,6 +270,24 @@ impl Ranking {
                 _ => {}
             }
         }
+
+        // Saves from before the history kept only the last ten scores. Carry those
+        // into the history, so the chart starts where the rank does and its first
+        // game's average is that game's own score.
+        if rank.history.len() < rank.recent.len() {
+            let missing = rank.recent.len() - rank.history.len();
+            for &score in rank.recent.iter().take(missing).rev() {
+                rank.history.push_front(GameRecord { score, words: 0, average: score });
+                rank.lifetime.games += 1;
+                rank.lifetime.score += u64::from(score);
+            }
+            let averages = rank.history_averages();
+            for (game, average) in rank.history.iter_mut().zip(averages) {
+                game.average = average;
+            }
+        }
+
+        rank.settle_league();
         rank
     }
 
@@ -297,6 +334,45 @@ mod tests {
     }
 
     #[test]
+    fn falling_below_the_floor_drops_a_league_without_waiting_for_five_rounds() {
+        let mut r = ranked(2, &[6_000]);
+        let change = r.record(1_000);
+        assert_eq!(change.movement, Movement::Relegated, "an average under Gold's floor kept Gold");
+        assert_eq!(r.league, 1);
+    }
+
+    #[test]
+    fn a_saved_league_the_average_no_longer_holds_is_left_on_load() {
+        let r = Ranking::from_text("version=3\nbest=9000\nleague=3\nrecent=3000,3000\n");
+        assert_eq!(r.league, 1, "Platinum on paper with a 3,000 average should settle in Silver");
+        let r = Ranking::from_text("version=3\nleague=3\nrecent=\n");
+        assert_eq!(r.league, 3, "no rounds on record is no evidence to move on");
+    }
+
+    #[test]
+    fn the_first_game_on_the_chart_averages_to_its_own_score() {
+        let mut r = Ranking::new();
+        for score in [3_000, 5_000, 1_000] {
+            r.record_round(score, 10, None);
+        }
+        assert_eq!(r.history_averages(), [3_000, 4_000, 3_000]);
+
+        // A save from before the history: its recent scores become the history.
+        let old = Ranking::from_text("version=2\nleague=0\nrecent=2000,4000,6000\n");
+        assert_eq!(old.history.iter().map(|g| g.score).collect::<Vec<_>>(), [2_000, 4_000, 6_000]);
+        assert_eq!(old.history_averages(), [2_000, 3_000, 4_000]);
+        assert_eq!(old.history_averages().last().copied(), Some(old.average()), "the chart ends where the rank is");
+
+        // A save whose history began after its recent scores: the older ones are
+        // carried in front, so the first point is a game averaged with itself.
+        let mut mixed = Ranking::from_text("version=2\nleague=0\nrecent=8000,9000\n");
+        mixed.record_round(1_000, 5, None);
+        let back = Ranking::from_text(&mixed.to_text().replace("history=8000:0:8000,9000:0:8500,", "history="));
+        assert_eq!(back.history.front().map(|g| (g.score, g.average)), Some((8_000, 8_000)));
+        assert_eq!(back.history_averages().last().copied(), Some(back.average()));
+    }
+
+    #[test]
     fn a_played_round_feeds_the_history_and_the_lifetime_totals() {
         let mut r = Ranking::new();
         r.record_round(3_000, 12, Some(("otters", 1_400)));
@@ -328,8 +404,11 @@ mod tests {
 
     #[test]
     fn a_save_round_trips_and_an_old_save_still_loads() {
-        let mut r = ranked(2, &[4_000, 6_000]);
+        let mut r = Ranking::new();
+        r.league = 2;
         r.best_score = 9_100;
+        r.record_round(4_000, 11, None);
+        r.record_round(6_000, 18, None);
         r.record_round(7_000, 25, Some(("quizzers", 2_200)));
         let back = Ranking::from_text(&r.to_text());
         assert_eq!(back.league, r.league);
@@ -339,9 +418,11 @@ mod tests {
         assert_eq!(back.lifetime, r.lifetime);
 
         let old = Ranking::from_text("version=2\nbest=5000\nleague=1\nrecent=1000,2000\n");
-        assert_eq!((old.league, old.best_score, old.recent.len()), (1, 5_000, 2));
-        assert!(old.history.is_empty());
-        assert_eq!(old.lifetime, Lifetime::default());
+        // Silver on paper with a 1,500 average: it settles back into Bronze.
+        assert_eq!((old.league, old.best_score, old.recent.len()), (0, 5_000, 2));
+        // Its recent scores become the start of its history.
+        assert_eq!(old.history.len(), 2);
+        assert_eq!(old.lifetime.games, 2);
     }
 
     #[test]

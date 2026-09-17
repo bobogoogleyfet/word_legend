@@ -27,7 +27,20 @@ const num = (value, fallback) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
-/** Scoring must match the client exactly, or the scorecard will lie. */
+/**
+ * What a word scores. This must match the client's `score_word` exactly, or the
+ * scorecard and the leaderboard will disagree: a superword (sixteen tiles, "qu"
+ * being one) scores a flat bonus; anything else its length's points, with 10%
+ * more for an obscure word.
+ */
+const SUPERWORD_POINTS = 20000;
+function scoreWord(word, obscure) {
+  const tiles = word.length - (word.match(/qu/g) || []).length;
+  if (tiles >= 16) return SUPERWORD_POINTS;
+  const points = wordPoints(word.length);
+  return obscure ? (points * 11) / 10 : points;
+}
+
 function wordPoints(length) {
   if (length <= 2) return 0;
   if (length === 3) return 100;
@@ -65,7 +78,11 @@ async function loadRound(env, round) {
   const pack = await env.ROUNDS.get(`pack:${Math.floor(slot / packSize)}`, "json");
   if (!pack) return null;
   const entry = pack[slot % packSize];
-  return entry ? { grid: entry.grid, theme: entry.theme, words: new Set(entry.words) } : null;
+  if (!entry) return null;
+  // Packs list common words in `words` and obscure ones in `obscure`. Older packs
+  // put both tiers in `words`; everything there scores as common.
+  const obscure = new Set(entry.obscure ?? []);
+  return { grid: entry.grid, theme: entry.theme, words: new Set([...entry.words, ...obscure]), obscure };
 }
 
 // --- responses --------------------------------------------------------------
@@ -167,7 +184,7 @@ async function scoreSubmission(request, env, body, phase) {
     if (seen.has(word)) continue; // a word scores once
     seen.add(word);
     if (board.words.has(word)) {
-      score += wordPoints(word.length);
+      score += scoreWord(word, board.obscure.has(word));
       accepted.push(word);
     } else {
       rejected.push(word);

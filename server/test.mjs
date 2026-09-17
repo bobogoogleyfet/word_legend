@@ -132,6 +132,7 @@ await test("real words score, and the score is computed server-side", async () =
     // Note the bogus `score`: the server must ignore whatever the client claims.
     body: JSON.stringify({ id: ID, round: roundInfo.round, words: realWords, score: 999999 }),
   }));
+  // realWords come from `words`, the common tier: plain length points.
   const expected = realWords.reduce((sum, w) => {
     const n = w.length;
     const pts = n <= 2 ? 0 : n === 3 ? 100 : n === 4 ? 400 : n === 5 ? 800
@@ -183,6 +184,33 @@ await test("the leaderboard shows names but never account ids", async () => {
   assert.equal(table.entries[0].name, "wordfan");
   assert.equal(table.entries[0].id, undefined, "an account id leaked onto the leaderboard");
   assert.ok(!JSON.stringify(table).includes(ID), "an account id leaked onto the leaderboard");
+});
+
+/** An env whose every round is this one board. */
+const envWith = (entry) => ({ ...env(), ROUNDS: makeKV({ "pack:0": JSON.stringify([entry]) }), PACK_SIZE: "1" });
+
+await test("obscure words score 10% more, and a superword scores its bonus", async () => {
+  const e = envWith({
+    grid: Array(16).fill("a"),
+    theme: null,
+    words: ["cat", "cats", "characterization"],
+    obscure: ["adit", "adits"],
+  });
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  const score = async (words) =>
+    (await body(await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words }) }))).score;
+  assert.equal(await score(["cat"]), 100);
+  assert.equal(await score(["adit"]), 440, "an obscure four-letter word is 400 + 10%");
+  assert.equal(await score(["adits"]), 880);
+  assert.equal(await score(["characterization"]), 20000, "a superword scores its bonus");
+  assert.equal(await score(["cats", "adits"]), 400 + 880);
+});
+
+await test("an older pack, with both tiers in words, still scores everything as common", async () => {
+  const e = envWith({ grid: Array(16).fill("a"), theme: null, words: ["cat", "adit"] });
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  const res = await body(await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: ["cat", "adit"] }) }));
+  assert.equal(res.score, 500);
 });
 
 await test("players finishing at the same moment all reach the leaderboard", async () => {

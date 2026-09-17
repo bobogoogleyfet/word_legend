@@ -38,12 +38,10 @@ enum ResultsTab {
     Words,
 }
 
-/// A letter tapped on the scorecard's board: the words that run through it, and
-/// which one's path is drawn on the board.
+/// A letter tapped on the scorecard's board, and the words that run through it.
 struct LetterFocus {
     at: Position,
     words: Vec<(String, Vec<Position>)>,
-    shown: Option<usize>,
 }
 
 /// First-run screen state, kept out of the app struct's main body.
@@ -121,6 +119,9 @@ pub struct WordLegendApp {
     show_stats: bool,
     /// A letter tapped on the scorecard's board, if any.
     letter_focus: Option<LetterFocus>,
+    /// A word tapped in any of the scorecard's lists, and its path, drawn on the
+    /// board.
+    shown_word: Option<(String, Vec<Position>)>,
     /// Where the cursor was last frame, so a drag can be traced as a segment
     /// rather than sampled as isolated points.
     drag_from: Option<Pos2>,
@@ -155,6 +156,7 @@ impl WordLegendApp {
             results_tab: ResultsTab::Leaderboard,
             show_stats: false,
             letter_focus: None,
+            shown_word: None,
             drag_from: None,
             elapsed: 0.0,
             code_copied_at: None,
@@ -227,6 +229,7 @@ impl WordLegendApp {
             self.show_stats = false;
             self.results_tab = ResultsTab::Leaderboard;
             self.letter_focus = None;
+            self.shown_word = None;
         }
 
         match self.game.phase {
@@ -969,6 +972,15 @@ impl WordLegendApp {
                     ui.label(league);
                     ui.label(average);
                 });
+                let to_go = match rank.next_threshold() {
+                    Some(next) => format!(
+                        "{} more average to reach {}",
+                        thousands(next.saturating_sub(rank.average()) as usize),
+                        LEAGUES[rank.league + 1].name
+                    ),
+                    None => "Top of the ladder".to_string(),
+                };
+                ui.label(egui::RichText::new(to_go).size(12.0).color(MUTED));
 
                 ui.add_space(26.0);
                 let (_, note, color) = app.join_prompt();
@@ -1333,29 +1345,29 @@ impl WordLegendApp {
                 let columns = ((ui.available_width() / 120.0).floor() as usize).clamp(1, 4);
                 let per_column = focus.words.len().div_ceil(columns);
                 ui.columns(columns, |cols| {
-                    for (i, (word, _)) in focus.words.iter().enumerate() {
+                    for (i, (word, path)) in focus.words.iter().enumerate() {
                         let col = &mut cols[i / per_column];
                         col.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                         let found = self.game.has_found(word);
-                        let shown = focus.shown == Some(i);
-                        let text = egui::RichText::new(format!("{word}  {}", crate::game::word_points(word.len())))
+                        let shown = self.shown_word.as_ref().is_some_and(|(w, _)| w == word);
+                        let text = egui::RichText::new(format!("{word}  {}", self.game.word_score(word)))
                             .size(12.0)
                             .color(if found { GREEN } else { TEXT });
                         if col.selectable_label(shown, text).clicked() {
-                            picked = Some(if shown { None } else { Some(i) });
+                            picked = Some(if shown { None } else { Some((word.clone(), path.clone())) });
                         }
                     }
                 });
             });
-        if let (Some(choice), Some(focus)) = (picked, self.letter_focus.as_mut()) {
-            focus.shown = choice;
+        if let Some(choice) = picked {
+            self.shown_word = choice;
         }
     }
 
     /// Common, Obscure and the board's own list as three columns side by side,
     /// each headed with found of total and scrolling on its own, the way WordHero
     /// laid them out. Found words are picked out in green, each with its points.
-    fn word_list_columns(&self, ui: &mut egui::Ui, height: f32) {
+    fn word_list_columns(&mut self, ui: &mut egui::Ui, height: f32) {
         /// The column header and the rule under it.
         const HEADER: f32 = 26.0;
         let (highlight, highlighted) = self.game.highlight_tab();
@@ -1365,6 +1377,7 @@ impl WordLegendApp {
             (highlight, highlighted),
         ];
         let body = (height - HEADER).max(40.0);
+        let mut picked: Option<String> = None;
 
         ui.columns(3, |cols| {
             for (i, (col, (name, words))) in cols.iter_mut().zip(lists).enumerate() {
@@ -1385,19 +1398,23 @@ impl WordLegendApp {
                         let width = ui.available_width();
                         for word in words {
                             let found = self.game.has_found(word);
+                            let shown = self.shown_word.as_ref().is_some_and(|(w, _)| w == word);
+                            let color = if shown { GOLD } else if found { GREEN } else { TEXT };
                             ui.horizontal(|ui| {
                                 // The word gives way to its points when space is short.
                                 ui.allocate_ui(Vec2::new((width - 30.0).max(20.0), 16.0), |ui| {
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(word.as_str()).size(12.0).color(if found { GREEN } else { TEXT }),
-                                        )
-                                        .truncate(),
+                                    let label = ui.add(
+                                        egui::Label::new(egui::RichText::new(word.as_str()).size(12.0).color(color))
+                                            .truncate()
+                                            .sense(Sense::click()),
                                     );
+                                    if label.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                        picked = Some(word.clone());
+                                    }
                                 });
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.label(
-                                        egui::RichText::new(crate::game::word_points(word.len()).to_string())
+                                        egui::RichText::new(self.game.word_score(word).to_string())
                                             .size(11.0)
                                             .color(MUTED),
                                     );
@@ -1407,6 +1424,15 @@ impl WordLegendApp {
                     });
             }
         });
+
+        // Tapping a word draws its path on the board; tapping it again clears it.
+        if let Some(word) = picked {
+            if self.shown_word.as_ref().is_some_and(|(w, _)| *w == word) {
+                self.shown_word = None;
+            } else if let Some(path) = crate::game::find_path(&self.game.grid, &word) {
+                self.shown_word = Some((word, path));
+            }
+        }
     }
 
     /// Everyone who played this board, best first.
@@ -1480,7 +1506,7 @@ impl WordLegendApp {
                 if self.letter_focus.as_ref().is_some_and(|f| f.at == at) {
                     self.letter_focus = None;
                 } else {
-                    self.letter_focus = Some(LetterFocus { at, words: self.game.words_through(at), shown: None });
+                    self.letter_focus = Some(LetterFocus { at, words: self.game.words_through(at) });
                 }
             }
         }
@@ -1519,7 +1545,7 @@ impl WordLegendApp {
         // The path of the word picked from the letter's list, drawn over the tiles
         // so it cannot hide behind them, and translucent so the letters still read
         // through it. A dot marks where the word starts.
-        if let Some(path) = self.letter_focus.as_ref().and_then(|f| f.shown.map(|i| &f.words[i].1)) {
+        if let Some((_, path)) = self.shown_word.as_ref() {
             let centres: Vec<Pos2> = path.iter().map(|p| geom.center(*p)).collect();
             let color = ACCENT.gamma_multiply(0.6);
             for pair in centres.windows(2) {
@@ -1647,7 +1673,13 @@ impl WordLegendApp {
     /// nearest game and reads both values off.
     fn history_chart(&self, ui: &mut egui::Ui, height: f32, limit: usize, axes: bool) {
         let history = &self.game.ranking.history;
-        let games: Vec<GameRecord> = history.iter().skip(history.len().saturating_sub(limit)).copied().collect();
+        let skip = history.len().saturating_sub(limit);
+        let mut games: Vec<GameRecord> = history.iter().skip(skip).copied().collect();
+        // The average line is worked out from the history's own scores -- each game
+        // with up to nine before it -- so the first game's average is its score.
+        for (game, average) in games.iter_mut().zip(self.game.ranking.history_averages().into_iter().skip(skip)) {
+            game.average = average;
+        }
 
         // Two series, so a legend, always; identity never rests on colour alone.
         ui.horizontal(|ui| {
@@ -1776,6 +1808,9 @@ impl WordLegendApp {
             ui.add_space(10.0);
 
             app.stacked(ui, |app, ui| app.history_chart(ui, if narrow { 190.0 } else { 230.0 }, HISTORY_GAMES, true));
+            ui.add_space(14.0);
+
+            app.stacked(ui, |_, ui| league_ladder(ui, league, average));
             ui.add_space(14.0);
 
             let per_game = |total: u64| if life.games == 0 { "—".to_string() } else { thousands((total / life.games) as usize) };
@@ -2286,6 +2321,36 @@ fn legend_key(ui: &mut egui::Ui, color: Color32, label: &str) {
     ui.painter().line_segment([key.left_center(), key.right_center()], Stroke::new(2.0_f32, color));
     ui.painter().circle(key.center(), 3.0, color, Stroke::NONE);
     ui.label(egui::RichText::new(label).size(11.0).color(MUTED));
+}
+
+/// Every league and the average it takes, with where the player stands: the
+/// league they are in, how far off each one above is, and the rule for moving.
+fn league_ladder(ui: &mut egui::Ui, league: usize, average: u32) {
+    ui.label(egui::RichText::new("Leagues").size(14.0).color(TEXT).strong());
+    ui.label(
+        egui::RichText::new(format!(
+            "Your league follows your average over your last {FORM_GAMES} games. Reach a league's average to move up \
+             (after {MIN_GAMES_TO_MOVE} games); fall below your league's and you drop back one."
+        ))
+        .size(11.0)
+        .color(MUTED),
+    );
+    ui.add_space(4.0);
+    egui::Grid::new("league_ladder").num_columns(3).spacing([14.0, 4.0]).show(ui, |ui| {
+        for (i, def) in LEAGUES.iter().enumerate() {
+            ui.label(egui::RichText::new(def.name).size(13.0).color(league_color(i)).strong());
+            ui.label(egui::RichText::new(format!("{} avg", thousands(def.threshold as usize))).size(12.0).color(TEXT));
+            let (status, color) = match i {
+                _ if i == league => ("You are here".to_string(), GOLD),
+                _ if i < league => ("Passed".to_string(), MUTED),
+                // Above the line already, but still short of the games to move.
+                _ if average >= def.threshold => ("Average reached".to_string(), GREEN),
+                _ => (format!("{} to go", thousands(def.threshold.saturating_sub(average) as usize)), MUTED),
+            };
+            ui.label(egui::RichText::new(status).size(12.0).color(color));
+            ui.end_row();
+        }
+    });
 }
 
 /// A titled group of label/value rows, for the stats page.
@@ -2816,6 +2881,9 @@ mod tests {
         let spread = |line: &[Pos2]| line.iter().map(|p| p.y).fold(f32::MIN, f32::max) - line.iter().map(|p| p.y).fold(f32::MAX, f32::min);
         assert!(spread(&averages[0]) < spread(&scores[0]), "the average should swing less than the games");
 
+        // The first game's average is its own score: the two lines start together.
+        assert!((averages[0][0].y - scores[0][0].y).abs() < 0.5, "the first game's average is not its score");
+
         // Two series, so a legend naming both.
         let texts = texts_of(&shapes);
         assert!(texts.iter().any(|t| t == "Game scores") && texts.iter().any(|t| t == "Average"), "no legend: {texts:?}");
@@ -2861,15 +2929,33 @@ mod tests {
             }
             app.show_stats = true;
             // Enough frames for the card's fade-in to finish, so colours are exact.
-            let (_, shapes) = run_frames(&mut app, size, 12);
-            assert_fits("stats page", &shapes, size);
+            let (ctx, top) = run_frames(&mut app, size, 12);
+            assert_fits("stats page", &top, size);
+            // A phone's page scrolls: read the bottom of it too.
+            let screen = Rect::from_min_size(Pos2::ZERO, size);
+            let mut bottom = Vec::new();
+            for events in [
+                vec![egui::Event::PointerMoved(screen.center())],
+                vec![egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -3000.0), modifiers: Default::default() }],
+            ]
+            .into_iter()
+            .chain(std::iter::repeat_with(Vec::new).take(30))
+            {
+                let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+                bottom = painted(ctx.run(input, |ctx| app.frame(ctx)).shapes);
+            }
+            let shapes: Vec<egui::Shape> = top.iter().cloned().chain(bottom).collect();
             let texts = texts_of(&shapes);
             for expected in ["Best Game", "All-time Averages", "Totals", "quizzers (2200 points)", "8,400", "5,466", "16,400", "62"] {
                 assert!(texts.iter().any(|t| t == expected), "stats page at {size:?} is missing {expected:?}: {texts:?}");
             }
-            assert_eq!(lines_in(&shapes, SERIES_SCORES).len(), 1, "no chart on the stats page at {size:?}");
+            assert_eq!(lines_in(&top, SERIES_SCORES).len(), 1, "no chart on the stats page at {size:?}");
             for label in ["Newest", "Oldest"] {
                 assert!(texts.iter().any(|t| t == label), "no {label} axis label at {size:?}");
+            }
+            // The leagues and the average each takes, with where the player is.
+            for expected in ["Leagues", "Bronze", "Silver", "2,500 avg", "Hero", "18,000 avg", "You are here", "Average reached"] {
+                assert!(texts.iter().any(|t| t == expected), "the league ladder at {size:?} is missing {expected:?}");
             }
         }
     }
@@ -3110,7 +3196,7 @@ mod tests {
             assert!(focus.words.iter().any(|(w, _)| w == "cats"), "CATS is not among the words through A");
             // Longest first, so the first entry is the one on screen to tap.
             let (first, _) = focus.words[0].clone();
-            let label = format!("{first}  {}", crate::game::word_points(first.len()));
+            let label = format!("{first}  {}", app.game.word_score(&first));
             assert!(texts.iter().any(|t| *t == label), "{label:?} is not listed at {size:?}");
             assert_fits("letter words", &shapes, size);
 
@@ -3126,7 +3212,7 @@ mod tests {
             frame(&mut app, vec![egui::Event::PointerMoved(cats), button(cats, true)]);
             frame(&mut app, vec![button(cats, false)]);
             shapes = frame(&mut app, vec![]);
-            let shown = app.letter_focus.as_ref().and_then(|f| f.shown.map(|i| f.words[i].0.clone()));
+            let shown = app.shown_word.as_ref().map(|(w, _)| w.clone());
             assert_eq!(shown.as_deref(), Some(first.as_str()), "tapping the word did not pick it at {size:?}");
             let after = shapes.iter().filter(|s| matches!(s, egui::Shape::LineSegment { .. })).count();
             assert!(after >= before + first.len() - 1, "{first}'s path was not drawn at {size:?}");
@@ -3151,6 +3237,58 @@ mod tests {
             frame(&mut app, vec![egui::Event::PointerMoved(a_tile), button(a_tile, true)]);
             frame(&mut app, vec![button(a_tile, false)]);
             assert!(app.letter_focus.is_none(), "the same letter did not close its list at {size:?}");
+        }
+    }
+
+    /// Any word in the scorecard's lists can be tapped to draw its path.
+    #[test]
+    fn tapping_a_word_in_the_lists_shows_its_path() {
+        for size in [PHONES[0], Vec2::new(1000.0, 780.0)] {
+            let mut app = offline_app(true);
+            app.game.start_round();
+            app.game.grid = std::array::from_fn(|r| {
+                std::array::from_fn(|c| crate::game::Cell { letters: ["c", "a", "t", "s", "h", "e", "r", "o", "m", "i", "n", "d", "p", "l", "u", "g"][r * SIZE + c] })
+            });
+            app.game.words = crate::game::solve_board(&app.game.dictionary, &app.game.grid);
+            app.game.score = 100;
+            app.game.time_left = 0.0;
+            app.game.tick(0.2);
+            app.results_tab = ResultsTab::Words;
+
+            let ctx = egui::Context::default();
+            let screen = Rect::from_min_size(Pos2::ZERO, size);
+            let frame = |app: &mut WordLegendApp, events: Vec<egui::Event>| {
+                let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+                painted(ctx.run(input, |ctx| app.frame(ctx)).shapes)
+            };
+            let mut shapes = Vec::new();
+            for _ in 0..12 {
+                shapes = frame(&mut app, vec![]);
+            }
+            let first = app.game.words.common[0].clone();
+            let at = shapes
+                .iter()
+                .find_map(|s| match s {
+                    egui::Shape::Text(t) if t.galley.job.text == first => Some(s.visual_bounding_rect().center()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{first} is not in the Common column at {size:?}"));
+            let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+            frame(&mut app, vec![egui::Event::PointerMoved(at), button(at, true)]);
+            frame(&mut app, vec![button(at, false)]);
+            let shapes = frame(&mut app, vec![]);
+
+            let (word, path) = app.shown_word.clone().unwrap_or_else(|| panic!("tapping {first} showed nothing at {size:?}"));
+            assert_eq!(word, first);
+            let spelled: String = path.iter().map(|p| app.game.grid[p.row][p.col].letters).collect();
+            assert_eq!(spelled, first, "the path does not spell the word");
+            let segments = shapes.iter().filter(|s| matches!(s, egui::Shape::LineSegment { .. })).count();
+            assert!(segments >= path.len() - 1, "no path drawn for {first} at {size:?}");
+
+            // Tapping it again clears the path.
+            frame(&mut app, vec![egui::Event::PointerMoved(at), button(at, true)]);
+            frame(&mut app, vec![button(at, false)]);
+            assert!(app.shown_word.is_none(), "tapping the word again did not clear its path at {size:?}");
         }
     }
 
