@@ -3820,6 +3820,7 @@ dependencies = [
 name = "word_legend"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "console_error_panic_hook",
  "eframe",
  "egui",

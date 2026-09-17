@@ -1,5 +1,6 @@
 //! egui front end: the board, the clock, and the round-end scorecard.
 
+use crate::clipboard::Paste;
 use crate::game::{Feedback, Game, Phase, Position, RESULTS_SECONDS, ROUND_SECONDS, SIZE};
 use crate::identity::{self, Identity};
 use crate::league::{Movement, FORM_GAMES, LEAGUES, MIN_GAMES_TO_MOVE};
@@ -26,11 +27,16 @@ struct Signup {
     name: String,
     code: String,
     restoring: bool,
-    copied: bool,
+    /// When the code was last copied, so the copy icon can show a tick for a moment.
+    copied_at: Option<f64>,
     /// The account whose name the server is being asked about, and since when.
     checking: Option<(Identity, f64)>,
     /// Why the last name was not accepted, shown under the name field.
     notice: Option<String>,
+    /// Where the Paste button's clipboard read lands.
+    paste: Paste,
+    /// Why the clipboard could not be read, if it could not.
+    paste_failed: Option<String>,
 }
 
 impl Signup {
@@ -40,9 +46,11 @@ impl Signup {
             name: String::new(),
             code: String::new(),
             restoring: false,
-            copied: false,
+            copied_at: None,
             checking: None,
             notice: None,
+            paste: Paste::default(),
+            paste_failed: None,
         }
     }
 }
@@ -52,6 +60,13 @@ const SHORT_WINDOW: f32 = 720.0;
 
 /// Seconds left at which the clock starts pulsing red.
 const PANIC_TIME: f32 = 15.0;
+
+/// How long the copy icon shows its tick after copying.
+const COPIED_TICK: f64 = 2.0;
+
+/// The recovery code field and its copy icon, by fixed id so tests can find them.
+const RECOVERY_CODE_ID: &str = "recovery_code";
+const COPY_CODE_ID: &str = "copy_recovery_code";
 
 /// How long signup waits on the server's answer about a name before letting the
 /// player in anyway. The name is claimed again once the server is back.
@@ -74,6 +89,8 @@ pub struct WordLegendApp {
     drag_from: Option<Pos2>,
     /// Drives the tile "pop" when a word lands, independent of game state.
     elapsed: f32,
+    /// When the recovery code was last copied from the start screen, to confirm it.
+    code_copied_at: Option<f64>,
 }
 
 impl WordLegendApp {
@@ -88,6 +105,7 @@ impl WordLegendApp {
             results_tab: 0,
             drag_from: None,
             elapsed: 0.0,
+            code_copied_at: None,
         }
     }
 }
@@ -236,19 +254,37 @@ impl WordLegendApp {
         ui.label(egui::RichText::new("YOUR RECOVERY CODE").size(11.0).color(MUTED).strong());
         ui.add_space(6.0);
 
-        // The code is the account. Make it impossible to miss.
+        // The code is the account. Make it impossible to miss. It is a read-only
+        // text field rather than painted text, so it can be selected and copied
+        // with Ctrl+C like any other text, and the icon beside it copies it whole.
         let code = pending.recovery_code();
         let (rect, _) = ui.allocate_exact_size(Vec2::new(420.0, 56.0), Sense::hover());
         let painter = ui.painter();
         painter.rect_filled(rect, 10.0, TILE);
         painter.rect_stroke(rect, 10.0, Stroke::new(2.0_f32, GOLD), egui::StrokeKind::Inside);
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            &code,
-            FontId::monospace(26.0),
-            GOLD,
+
+        let icon = Rect::from_center_size(
+            Pos2::new(rect.max.x - 30.0, rect.center().y),
+            Vec2::splat(40.0),
         );
+        let text = Rect::from_min_max(rect.min + Vec2::new(12.0, 0.0), Pos2::new(icon.min.x - 4.0, rect.max.y));
+        let mut shown = code.as_str();
+        ui.put(
+            text,
+            egui::TextEdit::singleline(&mut shown)
+                .id(egui::Id::new(RECOVERY_CODE_ID))
+                .font(FontId::monospace(26.0))
+                .text_color(GOLD)
+                .horizontal_align(egui::Align::Center)
+                .vertical_align(egui::Align::Center)
+                .frame(false),
+        );
+
+        let copied = self.signup.copied_at.is_some_and(|t| self.now - t < COPIED_TICK);
+        if copy_icon(ui, icon, copied).clicked() {
+            ui.ctx().copy_text(code.clone());
+            self.signup.copied_at = Some(self.now);
+        }
 
         ui.add_space(10.0);
         ui.label(
@@ -264,15 +300,6 @@ impl WordLegendApp {
             .size(12.0)
             .color(MUTED),
         );
-
-        ui.add_space(8.0);
-        if ui.button(egui::RichText::new("Copy code").size(12.0)).clicked() {
-            ui.ctx().copy_text(code.clone());
-            self.signup.copied = true;
-        }
-        if self.signup.copied {
-            ui.label(egui::RichText::new("Copied to clipboard").size(11.0).color(GREEN));
-        }
 
         ui.add_space(18.0);
         ui.label(egui::RichText::new("DISPLAY NAME").size(11.0).color(MUTED).strong());
@@ -317,15 +344,46 @@ impl WordLegendApp {
     fn signup_restore(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("ENTER YOUR CODE").size(11.0).color(MUTED).strong());
         ui.add_space(6.0);
-        ui.add(
-            egui::TextEdit::singleline(&mut self.signup.code)
-                .desired_width(320.0)
-                .font(egui::TextStyle::Monospace)
-                .hint_text("XXXX-XXXX-XXXX-XXXX"),
+        match self.signup.paste.take() {
+            Some(Ok(text)) => {
+                // Tidy a recognisable code into its usual form; anything else goes
+                // in as it came, so the player can see what was on the clipboard.
+                self.signup.code = Identity::from_recovery(&text)
+                    .map(|found| found.recovery_code())
+                    .unwrap_or_else(|| text.trim().to_string());
+                self.signup.paste_failed = None;
+            }
+            Some(Err(why)) => self.signup.paste_failed = Some(why),
+            None => {}
+        }
+
+        // The field and its button side by side, centred as one row.
+        ui.allocate_ui_with_layout(
+            Vec2::new(320.0 + 8.0 + 70.0, 30.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.signup.code)
+                        .desired_width(320.0)
+                        .font(egui::TextStyle::Monospace)
+                        .hint_text("XXXX-XXXX-XXXX-XXXX"),
+                );
+                if ui.add_sized([70.0, 24.0], egui::Button::new("Paste")).clicked() {
+                    self.signup.paste.request();
+                }
+            },
         );
 
         let parsed = Identity::from_recovery(&self.signup.code);
-        if parsed.is_none() && !self.signup.code.trim().is_empty() {
+        if let Some(why) = &self.signup.paste_failed {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Couldn't read the clipboard ({why}). Click the box and press Ctrl+V or Cmd+V."
+                ))
+                .size(11.0)
+                .color(AMBER),
+            );
+        } else if parsed.is_none() && !self.signup.code.trim().is_empty() {
             ui.label(
                 egui::RichText::new("That is not a valid code").size(11.0).color(RED),
             );
@@ -808,6 +866,18 @@ impl WordLegendApp {
             }
             ui.add_space(8.0);
             ui.label(egui::RichText::new(note).size(12.0).color(color));
+
+            // The code is only shown once at signup; this is the way back to it.
+            if let Some(code) = app.identity.as_ref().map(|me| me.recovery_code()) {
+                ui.add_space(10.0);
+                let copied = app.code_copied_at.is_some_and(|t| app.now - t < 3.0);
+                let (label, color) =
+                    if copied { ("Recovery code copied", GREEN) } else { ("Copy my recovery code", ACCENT) };
+                if ui.link(egui::RichText::new(label).size(12.0).color(color)).clicked() {
+                    ui.ctx().copy_text(code);
+                    app.code_copied_at = Some(app.now);
+                }
+            }
         });
     }
 
@@ -1338,6 +1408,35 @@ fn league_color(league: usize) -> Color32 {
     }
 }
 
+/// The usual two-overlapping-sheets copy icon, drawn rather than taken from a
+/// font so it looks the same everywhere. Turns into a tick once copied.
+fn copy_icon(ui: &mut egui::Ui, rect: Rect, copied: bool) -> egui::Response {
+    let response = ui
+        .interact(rect, egui::Id::new(COPY_CODE_ID), Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(if copied { "Copied" } else { "Copy code" });
+
+    let painter = ui.painter();
+    let background = if response.hovered() { TILE_EDGE } else { TILE };
+    painter.rect_filled(rect, 8.0, background);
+
+    let c = rect.center();
+    if copied {
+        let tick = vec![c + Vec2::new(-8.0, 0.0), c + Vec2::new(-2.5, 5.5), c + Vec2::new(8.0, -6.0)];
+        painter.add(egui::Shape::line(tick, Stroke::new(2.5_f32, GREEN)));
+    } else {
+        let color = if response.hovered() { TEXT } else { GOLD };
+        let stroke = Stroke::new(1.8_f32, color);
+        let back = Rect::from_min_size(c + Vec2::new(-8.0, -8.0), Vec2::splat(11.0));
+        let front = back.translate(Vec2::splat(5.0));
+        painter.rect_stroke(back, 2.0, stroke, egui::StrokeKind::Middle);
+        // The front sheet hides the back one where they overlap.
+        painter.rect_filled(front, 2.0, background);
+        painter.rect_stroke(front, 2.0, stroke, egui::StrokeKind::Middle);
+    }
+    response
+}
+
 fn big_button(ui: &mut egui::Ui, label: &str, color: Color32) -> bool {
     ui.add_sized(
         [240.0, 48.0],
@@ -1496,6 +1595,113 @@ mod tests {
             let over = overlay_rect_at(&mut app, |a, ctx| a.overlay_results(ctx), size);
             assert!(screen.contains_rect(over), "shared scorecard overflows {size:?}: {over:?}");
         }
+    }
+
+    /// Run one signup frame at the real window size with the given input events,
+    /// and return what egui asked the platform to put on the clipboard.
+    fn signup_frame(app: &mut WordLegendApp, ctx: &egui::Context, events: Vec<egui::Event>) -> Vec<String> {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 780.0));
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        let output = ctx.run(input, |ctx| app.overlay_signup(ctx));
+        output
+            .platform_output
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                egui::OutputCommand::CopyText(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_copy_icon_copies_the_whole_code() {
+        let mut app = WordLegendApp::new();
+        let ctx = egui::Context::default();
+        // The card takes a couple of frames to size and centre itself; aim after.
+        for _ in 0..4 {
+            signup_frame(&mut app, &ctx, vec![]);
+        }
+        let code = app.signup.pending.as_ref().unwrap().recovery_code();
+
+        let icon = ctx.read_response(egui::Id::new(COPY_CODE_ID)).expect("copy icon drawn").rect;
+        let at = icon.center();
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        signup_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(at)]);
+        signup_frame(&mut app, &ctx, vec![press(true)]);
+        let copied = signup_frame(&mut app, &ctx, vec![press(false)]);
+
+        assert_eq!(copied, vec![code], "the icon did not copy the code");
+        assert!(app.signup.copied_at.is_some(), "the icon should switch to its tick");
+    }
+
+    #[test]
+    fn the_code_can_be_selected_and_copied_by_hand() {
+        let mut app = WordLegendApp::new();
+        let ctx = egui::Context::default();
+        for _ in 0..4 {
+            signup_frame(&mut app, &ctx, vec![]);
+        }
+        let code = app.signup.pending.as_ref().unwrap().recovery_code();
+
+        // Select the middle two groups, as a drag across them would, then Ctrl+C.
+        let id = egui::Id::new(RECOVERY_CODE_ID);
+        let mut state = egui::widgets::text_edit::TextEditState::load(&ctx, id).expect("code field drawn");
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(5),
+            egui::text::CCursor::new(14),
+        )));
+        state.store(&ctx, id);
+        ctx.memory_mut(|m| m.request_focus(id));
+
+        signup_frame(&mut app, &ctx, vec![]);
+        let copied = signup_frame(&mut app, &ctx, vec![egui::Event::Copy]);
+        assert_eq!(copied, vec![code[5..14].to_string()], "Ctrl+C did not copy the selection");
+
+        // Typing into it changes nothing: it is there to be read, not edited.
+        signup_frame(&mut app, &ctx, vec![egui::Event::Text("x".into()), egui::Event::Key {
+            key: egui::Key::Backspace,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        }]);
+        assert_eq!(app.signup.pending.as_ref().unwrap().recovery_code(), code);
+    }
+
+    /// Signed in, the start card also offers the recovery code again.
+    #[test]
+    fn the_start_card_with_an_account_fits() {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 780.0));
+        let mut app = WordLegendApp::new();
+        app.identity = Some(Identity { id: "0123456789ABCDEF".into(), name: "wordfan".into() });
+        let ready = overlay_rect(&mut app, |a, ctx| a.overlay_ready(ctx));
+        assert!(screen.contains_rect(ready), "start card overflows: {ready:?}");
+    }
+
+    /// Pasting a saved note fills in just the code, tidied; a refused clipboard
+    /// says how to paste by hand instead, and the card still fits either way.
+    #[test]
+    fn pasting_a_code_fills_the_restore_field() {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 780.0));
+        let mut app = WordLegendApp::new();
+        app.signup.restoring = true;
+
+        app.signup.paste.put(Ok("Word Legend -- 0123-4567-89ab-cdef\n".into()));
+        let card = overlay_rect(&mut app, |a, ctx| a.overlay_signup(ctx));
+        assert_eq!(app.signup.code, "0123-4567-89AB-CDEF");
+        assert!(screen.contains_rect(card), "restore card overflows: {card:?}");
+
+        app.signup.paste.put(Err("clipboard access was refused".into()));
+        let card = overlay_rect(&mut app, |a, ctx| a.overlay_signup(ctx));
+        assert!(app.signup.paste_failed.is_some());
+        assert_eq!(app.signup.code, "0123-4567-89AB-CDEF", "a failed paste must not wipe the field");
+        assert!(screen.contains_rect(card), "restore card overflows: {card:?}");
     }
 
     /// The card must stay on screen when the window is too short to hold it,

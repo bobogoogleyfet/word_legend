@@ -63,10 +63,54 @@ impl Identity {
             .join("-")
     }
 
-    /// Read a code back, however the player typed it: spacing, dashes and case are
-    /// all forgiven, and the digits people confuse are folded together.
-    pub fn from_recovery(code: &str) -> Option<Self> {
-        let cleaned: String = code
+    /// Read a code back, however the player typed or pasted it. Case is forgiven,
+    /// and the characters people confuse are folded together.
+    ///
+    /// Only a code's own shapes are accepted: one unbroken or dashed run, or four
+    /// groups of four. Stripping everything but letters and digits would be
+    /// friendlier and is wrong -- "my word legend code" is sixteen valid
+    /// characters, and a misread code restores somebody else's account, or a
+    /// brand new empty one. Inside a longer paste, spaced groups also need a digit
+    /// among them, so a run of four-letter words is not taken for a code, and a
+    /// paste that could be read as two different codes is not read at all.
+    pub fn from_recovery(text: &str) -> Option<Self> {
+        let words: Vec<&str> = text
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .filter(|w| !w.is_empty())
+            .collect();
+        let spaced = |group: &[&str]| group.len() == 4 && group.iter().all(|w| w.len() == 4);
+
+        // Typed in groups, and nothing else.
+        if spaced(&words) {
+            return Self::parse_code(&words.concat());
+        }
+        if let Some(me) = words.iter().find_map(|w| Self::parse_code(w)) {
+            return Some(me);
+        }
+        // "code 0123 4567 89ab cdef" holds two readings; guessing between them is
+        // how the wrong account gets restored.
+        let mut readings: Vec<Self> = words
+            .windows(4)
+            .filter(|group| spaced(group))
+            .map(|group| group.concat())
+            .filter(|joined| joined.bytes().any(|b| b.is_ascii_digit()))
+            .filter_map(|joined| Self::parse_code(&joined))
+            .collect();
+        readings.dedup();
+        match readings.len() {
+            1 => readings.pop(),
+            _ => None,
+        }
+    }
+
+    /// One run of code: sixteen characters, bare or dashed into groups of four.
+    fn parse_code(run: &str) -> Option<Self> {
+        let groups: Vec<&str> = run.split('-').collect();
+        let shaped = groups.len() == 1 || groups.iter().all(|g| g.len() == 4);
+        if !shaped {
+            return None;
+        }
+        let cleaned: String = run
             .chars()
             .filter(|c| c.is_ascii_alphanumeric())
             .map(|c| match c.to_ascii_uppercase() {
@@ -179,6 +223,37 @@ mod tests {
         let me = Identity { id: "0123456789ABCDEF".to_string(), name: String::new() };
         let typed = "O123-456789-ABCDEF".replace('-', "");
         assert_eq!(Identity::from_recovery(&typed).unwrap().id, me.id);
+    }
+
+    #[test]
+    fn a_code_pasted_with_its_surroundings_is_found() {
+        let me = Identity::generate();
+        let code = me.recovery_code();
+        for pasted in [
+            format!("{code}\n"),
+            format!("Word Legend recovery code: {code}"),
+            format!("code:{code}, keep it safe"),
+            format!("my code is {}.", code.replace('-', " ")),
+        ] {
+            let back = Identity::from_recovery(&pasted);
+            assert_eq!(back.map(|b| b.id), Some(me.id.clone()), "{pasted:?} did not parse");
+        }
+    }
+
+    #[test]
+    fn plain_words_in_a_paste_are_not_mistaken_for_a_code() {
+        // Both are sixteen characters that fold into the code alphabet.
+        assert!(Identity::from_recovery("my word legend code").is_none());
+        assert!(Identity::from_recovery("save this code from game").is_none());
+    }
+
+    #[test]
+    fn a_paste_with_two_possible_codes_is_not_guessed() {
+        // "code 0123 4567 89ab" is a valid code too; refuse rather than pick one.
+        assert!(Identity::from_recovery("code 0123 4567 89ab cdef").is_none());
+        // Dashed, as the Copy button writes it, there is only one reading.
+        let back = Identity::from_recovery("code 0123-4567-89ab-cdef").map(|b| b.id);
+        assert_eq!(back.as_deref(), Some("0123456789ABCDEF"));
     }
 
     #[test]

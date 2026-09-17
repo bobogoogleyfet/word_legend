@@ -1,3 +1,4 @@
+mod clipboard;
 pub mod dictionary;
 pub mod export;
 pub mod game;
