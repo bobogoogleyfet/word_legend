@@ -48,6 +48,12 @@ impl Themes {
                 if (MIN_THEME_WORD..=MAX_THEME_WORD).contains(&word.len()) {
                     theme.plantable.push(word.clone());
                 }
+                // Plurals count: if CAT is an animal, CATS is too. A form that is
+                // not really a word never turns up on a solved board, so listing
+                // it does no harm.
+                for plural in plurals(&word) {
+                    theme.all.insert(plural);
+                }
                 theme.all.insert(word);
             }
         }
@@ -63,9 +69,29 @@ impl Themes {
     }
 }
 
+/// The regular plural spellings a word might take.
+fn plurals(word: &str) -> Vec<String> {
+    let mut out = vec![format!("{word}s"), format!("{word}es")];
+    if let Some(stem) = word.strip_suffix('y') {
+        if !stem.ends_with(['a', 'e', 'i', 'o', 'u']) {
+            out.push(format!("{stem}ies"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plurals_of_theme_words_count() {
+        let themes = Themes::load();
+        let animals = themes.get("Animals").unwrap();
+        assert!(animals.all.contains("cat") && animals.all.contains("cats"));
+        assert!(animals.all.contains("foxes"));
+        assert!(!animals.plantable.contains(&"cats".to_string()), "plurals are counted, not planted");
+    }
 
     #[test]
     fn categories_load_with_plantable_words() {

@@ -54,7 +54,7 @@ const ORIGIN = "https://bobogoogleyfet.github.io";
 const env = () => ({
   ROUNDS: makeKV({ "pack:0": JSON.stringify(pack) }),
   LEADERBOARD: makeNamespace(Leaderboard),
-  ROUND_SECONDS: "180", RESULTS_SECONDS: "60",
+  ROUND_SECONDS: "180", RESULTS_SECONDS: "30",
   PACK_COUNT: "1", PACK_SIZE: String(pack.length),
   ALLOWED_ORIGINS: ORIGIN,
 });

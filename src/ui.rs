@@ -1200,15 +1200,11 @@ impl WordLegendApp {
 
     /// Common / Obscure / Theme, the way WordHero split its word list.
     fn word_tabs(&mut self, ui: &mut egui::Ui) {
-        let counts = [
-            self.game.words.common.len(),
-            self.game.words.obscure.len(),
-            self.game.theme_words().len(),
-        ];
-
-        // The third tab is named after the board's own category when it has one.
-        let theme_tab = self.game.theme.clone().unwrap_or_else(|| "Theme".to_string());
-        let names = ["Common".to_string(), "Obscure".to_string(), theme_tab];
+        // The third tab is the board's own: its theme, its superword, or failing
+        // both its longest words.
+        let (highlight, highlighted) = self.game.highlight_tab();
+        let counts = [self.game.words.common.len(), self.game.words.obscure.len(), highlighted.len()];
+        let names = ["Common".to_string(), "Obscure".to_string(), highlight];
 
         ui.horizontal(|ui| {
             for (i, name) in names.iter().enumerate() {
@@ -1226,7 +1222,7 @@ impl WordLegendApp {
         let words: Vec<&String> = match self.results_tab {
             0 => self.game.words.common.iter().collect(),
             1 => self.game.words.obscure.iter().collect(),
-            _ => self.game.theme_words(),
+            _ => highlighted,
         };
 
         ui.add_space(6.0);

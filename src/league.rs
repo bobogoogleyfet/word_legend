@@ -12,6 +12,28 @@ pub const FORM_GAMES: usize = 10;
 /// Rounds needed before the ladder will move you, so one good round cannot
 /// launch a new player straight to the top.
 pub const MIN_GAMES_TO_MOVE: usize = 5;
+/// Games kept for the stats chart, oldest dropped first.
+pub const HISTORY_GAMES: usize = 50;
+
+/// One banked game, as the stats chart draws it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GameRecord {
+    pub score: u32,
+    pub words: u32,
+    /// The rank average straight after this game.
+    pub average: u32,
+}
+
+/// Everything ever banked, for the stats page.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Lifetime {
+    pub games: u64,
+    pub score: u64,
+    pub words: u64,
+    pub most_words: u32,
+    /// The best-scoring word ever found, and what it was worth.
+    pub best_word: Option<(String, u32)>,
+}
 
 pub struct LeagueDef {
     pub name: &'static str,
@@ -72,11 +94,42 @@ pub struct Ranking {
     /// Recent round scores, oldest first, at most `FORM_GAMES` of them.
     pub recent: VecDeque<u32>,
     pub best_score: u32,
+    /// The last `HISTORY_GAMES` games, oldest first.
+    pub history: VecDeque<GameRecord>,
+    pub lifetime: Lifetime,
 }
 
 impl Ranking {
     pub fn new() -> Self {
-        Ranking { league: 0, recent: VecDeque::new(), best_score: 0 }
+        Ranking {
+            league: 0,
+            recent: VecDeque::new(),
+            best_score: 0,
+            history: VecDeque::new(),
+            lifetime: Lifetime::default(),
+        }
+    }
+
+    /// Bank a played round: the rank, and everything the stats page shows.
+    pub fn record_round(&mut self, score: u32, words: u32, best_word: Option<(&str, u32)>) -> RankChange {
+        let change = self.record(score);
+
+        self.history.push_back(GameRecord { score, words, average: change.average });
+        while self.history.len() > HISTORY_GAMES {
+            self.history.pop_front();
+        }
+
+        let life = &mut self.lifetime;
+        life.games += 1;
+        life.score += u64::from(score);
+        life.words += u64::from(words);
+        life.most_words = life.most_words.max(words);
+        if let Some((word, points)) = best_word {
+            if life.best_word.as_ref().is_none_or(|(_, best)| points > *best) {
+                life.best_word = Some((word.to_string(), points));
+            }
+        }
+        change
     }
 
     /// The rank itself: the mean of the rounds on record.
@@ -151,10 +204,16 @@ impl Ranking {
             fresh.best_score = legacy_best();
             return fresh;
         };
+        Ranking::from_text(&text)
+    }
 
+    /// Read a save. Older saves lack the history and lifetime lines; they load
+    /// with those empty, and everything they did have intact.
+    pub fn from_text(text: &str) -> Self {
         let mut rank = Ranking::new();
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else { continue };
+            let number = || value.trim().parse::<u64>().unwrap_or(0);
             match key {
                 "best" => rank.best_score = value.parse().unwrap_or(0),
                 "league" => rank.league = value.parse::<usize>().unwrap_or(0).min(TOP_LEAGUE),
@@ -167,21 +226,56 @@ impl Ranking {
                         rank.recent.pop_front();
                     }
                 }
+                "history" => {
+                    rank.history = value
+                        .split(',')
+                        .filter_map(|game| {
+                            let mut parts = game.split(':').map(|p| p.trim().parse::<u32>().ok());
+                            Some(GameRecord { score: parts.next()??, words: parts.next()??, average: parts.next()?? })
+                        })
+                        .collect();
+                    while rank.history.len() > HISTORY_GAMES {
+                        rank.history.pop_front();
+                    }
+                }
+                "games" => rank.lifetime.games = number(),
+                "total_score" => rank.lifetime.score = number(),
+                "total_words" => rank.lifetime.words = number(),
+                "most_words" => rank.lifetime.most_words = number() as u32,
+                "best_word" => {
+                    rank.lifetime.best_word = value
+                        .rsplit_once(':')
+                        .and_then(|(word, points)| Some((word.to_string(), points.parse().ok()?)))
+                        .filter(|(word, _)| !word.is_empty());
+                }
                 _ => {}
             }
         }
         rank
     }
 
-    pub fn store(&self) {
+    pub fn to_text(&self) -> String {
         let recent: Vec<String> = self.recent.iter().map(|s| s.to_string()).collect();
-        let out = format!(
-            "version=2\nbest={}\nleague={}\nrecent={}\n",
+        let history: Vec<String> =
+            self.history.iter().map(|g| format!("{}:{}:{}", g.score, g.words, g.average)).collect();
+        let life = &self.lifetime;
+        let best_word = life.best_word.as_ref().map(|(w, p)| format!("{w}:{p}")).unwrap_or_default();
+        format!(
+            "version=3\nbest={}\nleague={}\nrecent={}\nhistory={}\ngames={}\ntotal_score={}\ntotal_words={}\nmost_words={}\nbest_word={}\n",
             self.best_score,
             self.league,
-            recent.join(",")
-        );
-        storage::write(storage::SAVE, &out);
+            recent.join(","),
+            history.join(","),
+            life.games,
+            life.score,
+            life.words,
+            life.most_words,
+            best_word,
+        )
+    }
+
+    pub fn store(&self) {
+        storage::write(storage::SAVE, &self.to_text());
     }
 }
 
@@ -200,6 +294,54 @@ mod tests {
         r.league = league;
         r.recent = scores.iter().copied().collect();
         r
+    }
+
+    #[test]
+    fn a_played_round_feeds_the_history_and_the_lifetime_totals() {
+        let mut r = Ranking::new();
+        r.record_round(3_000, 12, Some(("otters", 1_400)));
+        r.record_round(5_000, 20, Some(("hat", 100)));
+        assert_eq!(
+            r.history.iter().copied().collect::<Vec<_>>(),
+            [
+                GameRecord { score: 3_000, words: 12, average: 3_000 },
+                GameRecord { score: 5_000, words: 20, average: 4_000 },
+            ]
+        );
+        assert_eq!(r.lifetime.games, 2);
+        assert_eq!(r.lifetime.score, 8_000);
+        assert_eq!(r.lifetime.words, 32);
+        assert_eq!(r.lifetime.most_words, 20);
+        assert_eq!(r.lifetime.best_word, Some(("otters".to_string(), 1_400)), "a weaker word replaced the best");
+    }
+
+    #[test]
+    fn history_keeps_only_the_last_fifty_games() {
+        let mut r = Ranking::new();
+        for i in 1..=60 {
+            r.record_round(i * 100, 1, None);
+        }
+        assert_eq!(r.history.len(), HISTORY_GAMES);
+        assert_eq!(r.history.front().unwrap().score, 1_100);
+        assert_eq!(r.lifetime.games, 60, "lifetime totals are all-time, not windowed");
+    }
+
+    #[test]
+    fn a_save_round_trips_and_an_old_save_still_loads() {
+        let mut r = ranked(2, &[4_000, 6_000]);
+        r.best_score = 9_100;
+        r.record_round(7_000, 25, Some(("quizzers", 2_200)));
+        let back = Ranking::from_text(&r.to_text());
+        assert_eq!(back.league, r.league);
+        assert_eq!(back.recent, r.recent);
+        assert_eq!(back.best_score, 9_100);
+        assert_eq!(back.history, r.history);
+        assert_eq!(back.lifetime, r.lifetime);
+
+        let old = Ranking::from_text("version=2\nbest=5000\nleague=1\nrecent=1000,2000\n");
+        assert_eq!((old.league, old.best_score, old.recent.len()), (1, 5_000, 2));
+        assert!(old.history.is_empty());
+        assert_eq!(old.lifetime, Lifetime::default());
     }
 
     #[test]

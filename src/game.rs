@@ -4,6 +4,7 @@
 use crate::dictionary::{Dictionary, MIN_WORD_LEN};
 use crate::league::{RankChange, Ranking};
 use crate::net;
+use crate::rotation::SoloRotation;
 use crate::themes::{Theme, Themes};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -13,8 +14,9 @@ use std::collections::{HashMap, HashSet};
 pub const SIZE: usize = 4;
 /// A live round. Everyone playing is on the same one at the same time.
 pub const ROUND_SECONDS: f32 = 180.0;
-/// How long the scorecard holds before the next round begins.
-pub const RESULTS_SECONDS: f32 = 60.0;
+/// How long the scorecard holds before the next round begins. Short, so the next
+/// round is never long in coming.
+pub const RESULTS_SECONDS: f32 = 30.0;
 /// Everyone is on the same cycle, so the scorecard is a fixed window rather than
 /// something you dismiss: when it runs out the next round begins.
 
@@ -40,15 +42,13 @@ const DICE: [[&str; 6]; 16] = [
 ];
 
 /// A board is only fun if there is plenty to find. Reroll until it clears these.
-const MIN_SOLUTIONS: usize = 60;
-const MIN_LONG_SOLUTIONS: usize = 4;
-const LONG_WORD_LEN: usize = 6;
-/// The bar for a board-defining "superword".
-pub const SUPERWORD_LEN: usize = 7;
-/// How many words from a category a board needs before it counts as themed.
-const THEME_TARGET: usize = 3;
-/// Tries at planting a theme before falling back to a plain roll.
-const THEME_ATTEMPTS: usize = 60;
+pub const MIN_SOLUTIONS: usize = 60;
+pub const MIN_LONG_SOLUTIONS: usize = 4;
+pub const LONG_WORD_LEN: usize = 6;
+/// A superword fills the whole board: one word across all sixteen tiles.
+pub const SUPERWORD_TILES: usize = SIZE * SIZE;
+/// A longest word at least this long makes an unthemed board a "Long" one.
+const LONG_BOARD_LEN: usize = 10;
 /// Attempts the dictionary-free derivation makes at a board that looks playable.
 const DERIVE_ATTEMPTS: usize = 24;
 /// Every tile has to appear in at least this many words, so no letter is dead and
@@ -123,6 +123,8 @@ pub struct Game {
     /// How the round just played moved you on the ladder.
     pub rank_change: Option<RankChange>,
     pub is_dragging: bool,
+    /// What solo play serves next, when there is no server.
+    solo: SoloRotation,
 
     // Presentation state the UI animates against.
     pub feedback: Feedback,
@@ -136,7 +138,10 @@ impl Game {
     pub fn new() -> Self {
         let dictionary = Dictionary::new();
         let themes = Themes::load();
-        let (grid, words, theme) = generate_board(&dictionary, &themes);
+        let mut rng = StdRng::from_entropy();
+        // Only the backdrop behind the start screen; every round replaces it.
+        let (grid, words, theme) = generate_board_local(&dictionary, &mut rng);
+        let solo = SoloRotation::new(&mut rng);
         let ranking = Ranking::load();
 
         Game {
@@ -157,6 +162,7 @@ impl Game {
             ranking,
             rank_change: None,
             is_dragging: false,
+            solo,
             feedback: Feedback::None,
             feedback_word: String::new(),
             feedback_points: 0,
@@ -167,7 +173,8 @@ impl Game {
 
     /// Start a solo round on a board generated here.
     pub fn start_round(&mut self) {
-        let (grid, words, theme) = generate_board(&self.dictionary, &self.themes);
+        let mut rng = StdRng::from_entropy();
+        let (grid, words, theme) = self.solo.next_board(&self.dictionary, &mut rng);
         self.begin(grid, words, theme, None, ROUND_SECONDS);
     }
 
@@ -250,7 +257,9 @@ impl Game {
         // It still goes on the leaderboard; it just is not banked.
         self.rank_change = None;
         if self.counts_toward_rank() {
-            self.rank_change = Some(self.ranking.record(self.score));
+            let best = self.found.iter().max_by_key(|w| (w.points, w.word.len()));
+            let best = best.map(|w| (w.word.as_str(), w.points));
+            self.rank_change = Some(self.ranking.record_round(self.score, self.found.len() as u32, best));
             self.ranking.store();
         }
     }
@@ -410,40 +419,45 @@ impl Game {
         self.found.iter().map(|w| w.word.len()).sum::<usize>() as f32 / self.found.len() as f32
     }
 
-    /// A word long enough to define the board it sits on.
+    /// Words that fill the whole board. A superword board has one; any other
+    /// board has none.
     pub fn superwords(&self) -> Vec<&String> {
         self.words
             .common
             .iter()
-            .filter(|w| w.len() >= SUPERWORD_LEN)
+            .chain(self.words.obscure.iter())
+            .filter(|w| crate::rotation::word_tiles(w).is_some_and(|t| t.len() >= SUPERWORD_TILES))
             .collect()
     }
 
-    /// The board's theme words, or its superwords when it has no theme.
-    pub fn theme_words(&self) -> Vec<&String> {
-        if self.words.theme.is_empty() {
-            self.superwords()
-        } else {
-            self.words.theme.iter().collect()
+    /// The results screen's third tab: the theme's words on a themed board, the
+    /// superword on a superword board, otherwise the board's longest words.
+    pub fn highlight_tab(&self) -> (String, Vec<&String>) {
+        if let Some(theme) = &self.theme {
+            return (theme.clone(), self.words.theme.iter().collect());
         }
+        let supers = self.superwords();
+        if !supers.is_empty() {
+            return ("Superword".to_string(), supers);
+        }
+        let long = self.words.common.iter().filter(|w| w.len() >= 8).collect();
+        ("Longest".to_string(), long)
     }
 
-    /// What kind of board this is: its theme if it has one, otherwise a shape read
-    /// off its own solution set.
+    /// What kind of board this is: its theme or "Superword" when it was built as
+    /// one, otherwise a shape read off its own solution set.
     pub fn board_type(&self) -> String {
         if let Some(theme) = &self.theme {
-            // A themed board that also hides a long word is worth calling out.
-            return match self.words.common.first().map(|w| w.len()).unwrap_or(0) {
-                n if n >= SUPERWORD_LEN => format!("{theme} · Superword"),
-                _ => theme.clone(),
-            };
+            return theme.clone();
+        }
+        if !self.superwords().is_empty() {
+            return "Superword".to_string();
         }
 
         let longest = self.words.common.first().map(|w| w.len()).unwrap_or(0);
         let count = self.words.common.len();
         match () {
-            _ if longest >= SUPERWORD_LEN + 1 => "Superword".to_string(),
-            _ if longest >= SUPERWORD_LEN => "Long".to_string(),
+            _ if longest >= LONG_BOARD_LEN => "Long".to_string(),
             _ if count >= 120 => "Dense".to_string(),
             _ if count < 70 => "Sparse".to_string(),
             _ => "Standard".to_string(),
@@ -507,15 +521,6 @@ pub fn is_adjacent(a: Position, b: Position) -> bool {
 
 // --- board generation ------------------------------------------------------
 
-/// Roll boards until one is rich enough to play, keeping the best seen so far so
-/// this always terminates with something reasonable.
-fn generate_board(
-    dict: &Dictionary,
-    themes: &Themes,
-) -> ([[Cell; SIZE]; SIZE], BoardWords, Option<String>) {
-    generate_board_local(dict, themes)
-}
-
 /// Build the board for a given seed.
 ///
 /// Synchronised play needs every client to arrive at the same board without the
@@ -523,7 +528,6 @@ fn generate_board(
 /// no thread RNG, and every collection sorted into a total order before use.
 pub fn generate_board_seeded(
     dict: &Dictionary,
-    themes: &Themes,
     seed: u64,
 ) -> ([[Cell; SIZE]; SIZE], BoardWords, Option<String>) {
     // Walk a deterministic sequence of sub-seeds until one gives a board that
@@ -534,21 +538,16 @@ pub fn generate_board_seeded(
         let sub = seed
             .wrapping_mul(0x9E37_79B9_7F4A_7C15)
             .wrapping_add(attempt as u64);
-        let (grid, theme) = derive_grid(themes, sub);
-        let mut words = solve_board(dict, &grid);
-        if let Some(name) = &theme {
-            if let Some(def) = themes.list.iter().find(|t| &t.name == name) {
-                words.theme = collect_theme_words(&words, def);
-            }
-        }
+        let grid = derive_grid(sub);
+        let words = solve_board(dict, &grid);
 
         if board_is_good(&words) {
-            return (grid, words, theme);
+            return (grid, words, None);
         }
 
         let rank = words.common.len() as u32 + worst_tile(&words) * 20;
         if best.as_ref().is_none_or(|(_, _, _, r)| rank > *r) {
-            best = Some((grid, words, theme, rank));
+            best = Some((grid, words, None, rank));
         }
     }
 
@@ -556,24 +555,15 @@ pub fn generate_board_seeded(
     (grid, words, theme)
 }
 
-/// Solo play, where nothing has to agree with a server.
-fn generate_board_local(
+/// A plain board rolled from the dice, rerolled until it plays well.
+pub fn generate_board_local(
     dict: &Dictionary,
-    themes: &Themes,
+    rng: &mut impl Rng,
 ) -> ([[Cell; SIZE]; SIZE], BoardWords, Option<String>) {
-    let mut rng = rand::thread_rng();
-
-    // Build a themed board when we can; a plain roll is the fallback, not the plan.
-    if let Some(theme) = themes.list.choose(&mut rng) {
-        if let Some((grid, words)) = build_themed_board(dict, theme, &mut rng) {
-            return (grid, words, Some(theme.name.clone()));
-        }
-    }
-
     let mut best: Option<([[Cell; SIZE]; SIZE], BoardWords, usize)> = None;
 
     for _ in 0..MAX_BOARD_ATTEMPTS {
-        let grid = roll_dice(&mut rng);
+        let grid = roll_dice(rng);
         let words = solve_board(dict, &grid);
 
         if board_is_good(&words) {
@@ -769,7 +759,7 @@ mod tests {
     #[test]
     fn generated_boards_are_word_rich() {
         let dict = Dictionary::new();
-        let (_, words, _) = generate_board(&dict, &Themes::load());
+        let (_, words, _) = generate_board_local(&dict, &mut rand::thread_rng());
         assert!(words.common.len() >= MIN_SOLUTIONS, "got {} words", words.common.len());
     }
 
@@ -891,53 +881,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn themed_boards_carry_their_theme_and_stay_playable() {
-        let dict = Dictionary::new();
-        let themes = Themes::load();
-
-        for theme in themes.list.iter().take(6) {
-            let mut rng = rand::thread_rng();
-            let Some((grid, words)) = build_themed_board(&dict, theme, &mut rng) else {
-                panic!("could not build a {} board", theme.name);
-            };
-
-            assert!(words.theme.len() >= THEME_TARGET, "{}: too few theme words", theme.name);
-            for word in &words.theme {
-                assert!(theme.all.contains(word), "{word} is not a {} word", theme.name);
-                assert!(is_traceable(&grid, word), "{word} is listed but not traceable");
-            }
-            // A themed board is still a board: it has to be worth playing.
-            assert!(words.common.len() >= MIN_SOLUTIONS, "{}: only {} words", theme.name, words.common.len());
-        }
-    }
-
-    #[test]
-    fn geography_themes_work_despite_being_impossible_by_chance() {
-        // Countries turned up on 0 of 300 rolled boards; planting is what makes
-        // them viable, so this is the case most worth guarding.
-        let dict = Dictionary::new();
-        let themes = Themes::load();
-        let theme = themes.get("Countries").expect("Countries theme");
-        let mut rng = rand::thread_rng();
-
-        let (grid, words) = build_themed_board(&dict, theme, &mut rng).expect("no Countries board");
-        assert!(words.theme.len() >= THEME_TARGET);
-        for word in &words.theme {
-            assert!(is_traceable(&grid, word));
-        }
-    }
-
     /// Synchronised play stands on this: two clients given the same seed must build
     /// the identical board, or they are not playing the same game.
     #[test]
     fn a_seed_always_builds_the_same_board() {
         let dict = Dictionary::new();
-        let themes = Themes::load();
 
         for seed in [0u64, 1, 42, 9_999, u64::MAX] {
-            let (grid_a, words_a, theme_a) = generate_board_seeded(&dict, &themes, seed);
-            let (grid_b, words_b, theme_b) = generate_board_seeded(&dict, &themes, seed);
+            let (grid_a, words_a, theme_a) = generate_board_seeded(&dict, seed);
+            let (grid_b, words_b, theme_b) = generate_board_seeded(&dict, seed);
 
             let letters = |g: &[[Cell; SIZE]; SIZE]| {
                 (0..SIZE)
@@ -947,7 +899,6 @@ mod tests {
             assert_eq!(letters(&grid_a), letters(&grid_b), "seed {seed} drifted");
             assert_eq!(theme_a, theme_b, "seed {seed} changed theme");
             assert_eq!(words_a.common, words_b.common, "seed {seed} changed solutions");
-            assert_eq!(words_a.theme, words_b.theme, "seed {seed} changed theme words");
         }
     }
 
@@ -957,10 +908,9 @@ mod tests {
     #[test]
     fn seeded_boards_are_pinned() {
         let dict = Dictionary::new();
-        let themes = Themes::load();
 
         let board_of = |seed| {
-            let (g, w, t) = generate_board_seeded(&dict, &themes, seed);
+            let (g, w, t) = generate_board_seeded(&dict, seed);
             let rows: Vec<String> = (0..SIZE)
                 .map(|r| (0..SIZE).map(|c| g[r][c].letters).collect::<Vec<_>>().join("|"))
                 .collect();
@@ -968,15 +918,15 @@ mod tests {
         };
 
         let (rows, theme, count, worst) = board_of(42);
-        assert_eq!(rows, ["t|o|r|b", "w|z|o|i", "e|n|g|n", "r|t|h|k"]);
-        assert_eq!(theme.as_deref(), Some("History"));
-        assert_eq!(count, 85);
+        assert_eq!(rows, ["e|a|s|u", "a|a|r|g", "t|l|d|c", "f|e|r|h"]);
+        assert_eq!(theme, None, "seeded boards are plain; themes come from the rotation");
+        assert_eq!(count, 77);
         assert!(worst >= MIN_TILE_COVERAGE);
 
         let (rows, theme, count, worst) = board_of(1234);
-        assert_eq!(rows, ["y|k|b|s", "o|n|o|i", "n|s|l|t", "m|i|k|g"]);
-        assert_eq!(theme.as_deref(), Some("Capitals"));
-        assert_eq!(count, 95);
+        assert_eq!(rows, ["n|a|t|e", "s|e|b|t", "n|s|e|a", "e|s|n|t"]);
+        assert_eq!(theme, None);
+        assert_eq!(count, 81);
         assert!(worst >= MIN_TILE_COVERAGE);
     }
 
@@ -985,10 +935,9 @@ mod tests {
     #[test]
     fn every_tile_appears_in_at_least_two_words() {
         let dict = Dictionary::new();
-        let themes = Themes::load();
 
         for seed in 0..25u64 {
-            let (grid, words, _) = generate_board_seeded(&dict, &themes, seed);
+            let (grid, words, _) = generate_board_seeded(&dict, seed);
             let worst = worst_tile(&words);
             assert!(
                 worst >= MIN_TILE_COVERAGE,
@@ -1013,9 +962,8 @@ mod tests {
     #[test]
     fn different_seeds_build_different_boards() {
         let dict = Dictionary::new();
-        let themes = Themes::load();
         let letters = |seed| {
-            let (g, _, _) = generate_board_seeded(&dict, &themes, seed);
+            let (g, _, _) = generate_board_seeded(&dict, seed);
             (0..SIZE)
                 .map(|r| (0..SIZE).map(|c| g[r][c].letters).collect::<String>())
                 .collect::<Vec<_>>()
@@ -1027,11 +975,11 @@ mod tests {
     }
 
     #[test]
-    fn a_round_is_three_minutes_then_a_minute_of_results() {
+    fn a_round_is_three_minutes_then_half_a_minute_of_results() {
         assert_eq!(ROUND_SECONDS, 180.0);
-        assert_eq!(RESULTS_SECONDS, 60.0);
-        // One four-minute cycle, which is what a shared clock would tick on.
-        assert_eq!(ROUND_SECONDS + RESULTS_SECONDS, 240.0);
+        assert_eq!(RESULTS_SECONDS, 30.0);
+        // One three-and-a-half-minute cycle: what the server's clock ticks on too.
+        assert_eq!(ROUND_SECONDS + RESULTS_SECONDS, 210.0);
     }
 
     #[test]
@@ -1050,8 +998,16 @@ mod tests {
 
         // With a theme, the theme names it.
         game.theme = Some("Animals".to_string());
-        assert!(game.board_type().starts_with("Animals"));
-        assert!(game.superwords().iter().all(|w| w.len() >= SUPERWORD_LEN));
+        assert_eq!(game.board_type(), "Animals");
+        assert_eq!(game.highlight_tab().0, "Animals");
+
+        // A nine-letter word is long, not a superword; only filling the board is.
+        game.theme = None;
+        game.words.common.insert(0, "aeroplane".to_string());
+        assert_ne!(game.board_type(), "Superword");
+        game.words.common.insert(0, "characterization".to_string());
+        assert_eq!(game.board_type(), "Superword");
+        assert_eq!(game.highlight_tab().0, "Superword");
     }
 
     #[test]
@@ -1100,50 +1056,22 @@ pub fn worst_tile(words: &BoardWords) -> u32 {
 /// letter-shape heuristic rather than by solving the board. The client still
 /// solves it afterwards -- it has the dictionary -- but that solve no longer
 /// influences which grid the seed produces.
-pub fn derive_grid(themes: &Themes, seed: u64) -> ([[Cell; SIZE]; SIZE], Option<String>) {
+pub fn derive_grid(seed: u64) -> [[Cell; SIZE]; SIZE] {
     let mut rng = StdRng::seed_from_u64(seed);
-    let mut fallback: Option<([[Cell; SIZE]; SIZE], Option<String>)> = None;
+    let mut fallback: Option<[[Cell; SIZE]; SIZE]> = None;
 
     for _ in 0..DERIVE_ATTEMPTS {
-        let (grid, theme) = match themes.list.choose(&mut rng) {
-            Some(theme) => match plant_theme(theme, &mut rng) {
-                Some(cells) => (fill_grid(cells, &mut rng), Some(theme.name.clone())),
-                None => (fill_grid(Default::default(), &mut rng), None),
-            },
-            None => (fill_grid(Default::default(), &mut rng), None),
-        };
-
+        let grid = fill_grid(Default::default(), &mut rng);
         if looks_playable(&grid) {
-            return (grid, theme);
+            return grid;
         }
-        fallback.get_or_insert((grid, theme));
+        fallback.get_or_insert(grid);
     }
 
     fallback.expect("at least one grid was derived")
 }
 
-/// Plant the theme's words, or give up if they will not fit together.
-fn plant_theme(
-    theme: &Theme,
-    rng: &mut impl Rng,
-) -> Option<[[Option<&'static str>; SIZE]; SIZE]> {
-    let mut cells: [[Option<&'static str>; SIZE]; SIZE] = Default::default();
-    let mut candidates = theme.plantable.clone();
-    candidates.shuffle(rng);
-
-    let mut planted = 0;
-    for word in candidates.iter().take(40) {
-        if planted >= THEME_TARGET {
-            break;
-        }
-        if plant_word(&mut cells, word, rng) {
-            planted += 1;
-        }
-    }
-    (planted >= THEME_TARGET).then_some(cells)
-}
-
-fn fill_grid(
+pub fn fill_grid(
     cells: [[Option<&'static str>; SIZE]; SIZE],
     rng: &mut impl Rng,
 ) -> [[Cell; SIZE]; SIZE] {
@@ -1179,7 +1107,7 @@ fn looks_playable(grid: &[[Cell; SIZE]; SIZE]) -> bool {
 /// Trace `word` across the grid, writing its letters into empty cells and reusing
 /// any that already match. Returns false and leaves the grid untouched if the word
 /// cannot be laid out along adjacent cells.
-fn plant_word(
+pub fn plant_word(
     grid: &mut [[Option<&'static str>; SIZE]; SIZE],
     word: &str,
     rng: &mut impl Rng,
@@ -1259,51 +1187,7 @@ fn neighbours(at: Position) -> Vec<Position> {
     out
 }
 
-/// Plant several words from one category, then fill the rest from the dice so the
-/// board still plays like a normal one.
-fn build_themed_board(
-    dict: &Dictionary,
-    theme: &Theme,
-    rng: &mut impl Rng,
-) -> Option<([[Cell; SIZE]; SIZE], BoardWords)> {
-    for _ in 0..THEME_ATTEMPTS {
-        let mut cells: [[Option<&'static str>; SIZE]; SIZE] = Default::default();
-        let mut candidates = theme.plantable.clone();
-        candidates.shuffle(rng);
-
-        let mut planted = 0;
-        for word in candidates.iter().take(40) {
-            if planted >= THEME_TARGET {
-                break;
-            }
-            if plant_word(&mut cells, word, rng) {
-                planted += 1;
-            }
-        }
-        if planted < THEME_TARGET {
-            continue;
-        }
-
-        let grid: [[Cell; SIZE]; SIZE] = std::array::from_fn(|row| {
-            std::array::from_fn(|col| Cell {
-                letters: cells[row][col].unwrap_or_else(|| roll_face(rng)),
-            })
-        });
-
-        let mut words = solve_board(dict, &grid);
-        words.theme = collect_theme_words(&words, theme);
-
-        // A themed board still has to be worth playing, and the planted words must
-        // survive as findable ones.
-        if !board_is_good(&words) || words.theme.len() < THEME_TARGET {
-            continue;
-        }
-        return Some((grid, words));
-    }
-    None
-}
-
-fn collect_theme_words(words: &BoardWords, theme: &Theme) -> Vec<String> {
+pub fn collect_theme_words(words: &BoardWords, theme: &Theme) -> Vec<String> {
     let mut found: Vec<String> = words
         .common
         .iter()

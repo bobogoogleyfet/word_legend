@@ -34,7 +34,7 @@ new_sqlite_classes = ["Leaderboard"]
 [vars]
 # Public knobs only. Secrets never appear here.
 ROUND_SECONDS = "180"
-RESULTS_SECONDS = "60"
+RESULTS_SECONDS = "30"
 # Rounds cycle through the packs that have been uploaded.
 PACK_COUNT = "10"
 PACK_SIZE = "100"

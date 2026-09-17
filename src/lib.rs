@@ -4,6 +4,7 @@ pub mod export;
 pub mod game;
 mod identity;
 pub mod net;
+pub mod rotation;
 mod league;
 mod live;
 mod storage;

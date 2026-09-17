@@ -21,7 +21,7 @@ export { Leaderboard } from "./leaderboard.js";
 /** The Durable Object holding a round's leaderboard. */
 const leaderboard = (env, round) => env.LEADERBOARD.getByName(`round:${round}`);
 
-const CYCLE = (env) => num(env.ROUND_SECONDS, 180) + num(env.RESULTS_SECONDS, 60);
+const CYCLE = (env) => num(env.ROUND_SECONDS, 180) + num(env.RESULTS_SECONDS, 30);
 const num = (value, fallback) => {
   const n = parseInt(value, 10);
   return Number.isFinite(n) ? n : fallback;
