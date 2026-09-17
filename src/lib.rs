@@ -4,6 +4,7 @@ pub mod game;
 mod identity;
 pub mod net;
 mod league;
+mod live;
 mod storage;
 pub mod themes;
 mod ui;

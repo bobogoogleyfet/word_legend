@@ -1,8 +1,10 @@
 //! egui front end: the board, the clock, and the round-end scorecard.
 
-use crate::game::{Feedback, Game, Phase, Position, ROUND_SECONDS, SIZE};
+use crate::game::{Feedback, Game, Phase, Position, RESULTS_SECONDS, ROUND_SECONDS, SIZE};
 use crate::identity::{self, Identity};
 use crate::league::{Movement, FORM_GAMES, LEAGUES, MIN_GAMES_TO_MOVE};
+use crate::live::{Live, NameStatus, MIN_JOIN_SECONDS};
+use crate::net::{self, Link};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
 const BG: Color32 = Color32::from_rgb(0x12, 0x14, 0x1c);
@@ -25,6 +27,10 @@ struct Signup {
     code: String,
     restoring: bool,
     copied: bool,
+    /// The account whose name the server is being asked about, and since when.
+    checking: Option<(Identity, f64)>,
+    /// Why the last name was not accepted, shown under the name field.
+    notice: Option<String>,
 }
 
 impl Signup {
@@ -35,6 +41,8 @@ impl Signup {
             code: String::new(),
             restoring: false,
             copied: false,
+            checking: None,
+            notice: None,
         }
     }
 }
@@ -45,8 +53,16 @@ const SHORT_WINDOW: f32 = 720.0;
 /// Seconds left at which the clock starts pulsing red.
 const PANIC_TIME: f32 = 15.0;
 
+/// How long signup waits on the server's answer about a name before letting the
+/// player in anyway. The name is claimed again once the server is back.
+const NAME_CHECK_TIMEOUT: f64 = 8.0;
+
 pub struct WordLegendApp {
     game: Game,
+    /// Keeps the game on the shared round, when there is a server to follow.
+    live: Live,
+    /// egui's clock, read once a frame; what `live` measures its timings against.
+    now: f64,
     /// The account. Absent until the first-run screen has been through.
     identity: Option<Identity>,
     /// First-run screen state.
@@ -65,6 +81,8 @@ impl WordLegendApp {
         let identity = Identity::load();
         Self {
             game: Game::new(),
+            live: Live::new(net::Client::new(net::DEFAULT_SERVER)),
+            now: 0.0,
             signup: Signup::new(identity.is_none()),
             identity,
             results_tab: 0,
@@ -82,7 +100,16 @@ impl eframe::App for WordLegendApp {
         // swallow a chunk of the round clock in one step.
         let dt = ctx.input(|i| i.stable_dt).min(0.1);
         self.elapsed += dt;
+        self.now = ctx.input(|i| i.time);
         self.game.tick(dt);
+
+        // Nobody plays before they have a name, but the clock is read regardless so
+        // the start screen can say what round is on.
+        let me = self.identity.clone().filter(|_| !self.needs_signup());
+        self.live.update(&mut self.game, me.as_ref(), self.now);
+        self.follow_name_check();
+        // Network replies land outside egui, so nothing else would wake a quiet frame.
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
 
         style(ctx);
         self.handle_keys(ctx);
@@ -128,6 +155,60 @@ impl eframe::App for WordLegendApp {
 impl WordLegendApp {
     fn needs_signup(&self) -> bool {
         self.identity.as_ref().map(|i| i.name.is_empty()).unwrap_or(true)
+    }
+
+    /// Ask the server for a name; `follow_name_check` lets the player in once it
+    /// answers.
+    fn check_name(&mut self, me: Identity) {
+        self.signup.notice = None;
+        self.live.claim(&me, self.now);
+        self.signup.checking = Some((me, self.now));
+    }
+
+    fn follow_name_check(&mut self) {
+        if let Some((me, since)) = self.signup.checking.clone() {
+            let timed_out = self.now - since > NAME_CHECK_TIMEOUT;
+            match &self.live.name {
+                NameStatus::Refused(why) => {
+                    self.signup.notice = Some(why.clone());
+                    self.signup.checking = None;
+                }
+                // No answer is not a no: play on, and the claim is retried later.
+                NameStatus::Claimed | NameStatus::Unreachable => self.finish_signup(me),
+                _ if timed_out => self.finish_signup(me),
+                _ => {}
+            }
+            return;
+        }
+
+        // A saved account whose name someone else now holds: keep the account,
+        // ask for a different name.
+        if let (Some(me), NameStatus::Refused(why)) = (&self.identity, &self.live.name) {
+            self.signup.restoring = true;
+            self.signup.code = me.recovery_code();
+            self.signup.name.clear();
+            self.signup.notice = Some(format!("{why}. Pick another name."));
+            self.identity = None;
+        }
+    }
+
+    fn finish_signup(&mut self, me: Identity) {
+        me.store();
+        self.identity = Some(me);
+        self.signup.checking = None;
+        self.signup.notice = None;
+    }
+
+    /// The name field's error line: a local problem with the name, or the
+    /// server's answer about it.
+    fn name_problem(&self, ui: &mut egui::Ui, checked: &Result<String, identity::NameError>) {
+        if let Err(problem) = checked {
+            if !self.signup.name.trim().is_empty() {
+                ui.label(egui::RichText::new(problem.message()).size(11.0).color(RED));
+            }
+        } else if let Some(notice) = &self.signup.notice {
+            ui.label(egui::RichText::new(notice).size(11.0).color(RED));
+        }
     }
 
     /// First run: hand over the recovery code, take a display name.
@@ -208,18 +289,14 @@ impl WordLegendApp {
         );
 
         let checked = identity::check_name(&self.signup.name);
-        if let Err(problem) = &checked {
-            if !self.signup.name.trim().is_empty() {
-                ui.label(egui::RichText::new(problem.message()).size(11.0).color(RED));
-            }
-        }
+        self.name_problem(ui, &checked);
 
         ui.add_space(14.0);
-        if let Ok(name) = checked {
+        if self.signup.checking.is_some() {
+            ui.add_enabled(false, egui::Button::new(egui::RichText::new("CHECKING NAME…").size(17.0)));
+        } else if let Ok(name) = checked {
             if big_button(ui, "START PLAYING", ACCENT) {
-                let me = Identity { id: pending.id.clone(), name };
-                me.store();
-                self.identity = Some(me);
+                self.check_name(Identity { id: pending.id.clone(), name });
             }
         } else {
             ui.add_enabled(
@@ -261,14 +338,17 @@ impl WordLegendApp {
                 .desired_width(280.0)
                 .hint_text("pick a name"),
         );
+        let checked = identity::check_name(&self.signup.name);
+        self.name_problem(ui, &checked);
 
         ui.add_space(14.0);
-        match (parsed, identity::check_name(&self.signup.name)) {
+        match (parsed, checked) {
+            _ if self.signup.checking.is_some() => {
+                ui.add_enabled(false, egui::Button::new(egui::RichText::new("CHECKING NAME…").size(17.0)));
+            }
             (Some(found), Ok(name)) => {
                 if big_button(ui, "RESTORE ACCOUNT", ACCENT) {
-                    let me = Identity { id: found.id, name };
-                    me.store();
-                    self.identity = Some(me);
+                    self.check_name(Identity { id: found.id, name });
                 }
             }
             _ => {
@@ -289,6 +369,10 @@ impl WordLegendApp {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        // Enter in the name field is typing, not a request to start a round.
+        if self.needs_signup() {
+            return;
+        }
         let (enter, escape, space) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Enter),
@@ -307,7 +391,7 @@ impl WordLegendApp {
             }
             Phase::Ready | Phase::Over => {
                 if enter || space {
-                    self.game.start_round();
+                    self.live.play_now(&mut self.game, self.now);
                 }
             }
         }
@@ -344,13 +428,42 @@ impl WordLegendApp {
                 );
             });
 
-            ui.add_space(28.0);
+            ui.add_space(24.0);
+
+            ui.vertical(|ui| {
+                let name = self.identity.as_ref().map(|i| i.name.as_str()).unwrap_or("");
+                ui.label(egui::RichText::new(name).size(15.0).color(TEXT).strong());
+                let (label, color) = self.link_label();
+                ui.label(egui::RichText::new(label).size(11.0).color(color).strong());
+            });
+
+            ui.add_space(24.0);
 
             ui.vertical(|ui| {
                 ui.add_space(4.0);
                 self.timer_bar(ui);
             });
         });
+    }
+
+    /// Whether this board is the one everyone is on, in a word.
+    fn link_label(&self) -> (String, Color32) {
+        match self.live.link() {
+            Link::Online if self.live.is_live(self.now) => ("LIVE".to_string(), GREEN),
+            Link::Online => ("SOLO · NO ROUNDS".to_string(), AMBER),
+            Link::Connecting if self.live.is_live(self.now) => ("CONNECTING…".to_string(), MUTED),
+            Link::Solo => ("SOLO".to_string(), MUTED),
+            _ => ("OFFLINE · SOLO".to_string(), AMBER),
+        }
+    }
+
+    /// Seconds until the next shared round starts, if there is one to wait for.
+    fn next_shared_round_in(&self) -> Option<f32> {
+        if !self.live.is_live(self.now) {
+            return None;
+        }
+        let clock = self.live.clock()?;
+        Some(if clock.playing { clock.left + RESULTS_SECONDS } else { clock.left })
     }
 
     fn timer_bar(&self, ui: &mut egui::Ui) {
@@ -689,12 +802,43 @@ impl WordLegendApp {
             );
 
             ui.add_space(18.0);
-            if big_button(ui, "START ROUND", ACCENT) {
-                app.game.start_round();
+            let (button, note, color) = app.join_prompt();
+            if big_button(ui, &button, ACCENT) {
+                app.live.play_now(&mut app.game, app.now);
             }
             ui.add_space(8.0);
-            ui.label(egui::RichText::new("or press Enter").size(12.0).color(MUTED));
+            ui.label(egui::RichText::new(note).size(12.0).color(color));
         });
+    }
+
+    /// What the start button says, and the line under it, given the shared clock.
+    fn join_prompt(&self) -> (String, String, Color32) {
+        let clock = self.live.clock().filter(|_| self.live.is_live(self.now));
+        let waiting = self.live.joined();
+
+        match (clock, self.live.link()) {
+            (Some(c), _) if c.playing && c.left >= MIN_JOIN_SECONDS && !waiting => (
+                "JOIN ROUND".to_string(),
+                format!("Everyone is on this board · {} left · or press Enter", clock_text(c.left)),
+                GREEN,
+            ),
+            (Some(_), _) => {
+                let next = self.next_shared_round_in().unwrap_or(0.0);
+                let button = if waiting { "YOU'RE IN" } else { "JOIN NEXT ROUND" };
+                (button.to_string(), format!("Next round starts in {}", clock_text(next)), AMBER)
+            }
+            (None, Link::Connecting) if self.live.is_live(self.now) => (
+                "START ROUND".to_string(),
+                "Connecting to the live round…".to_string(),
+                MUTED,
+            ),
+            (None, Link::Solo) => ("START ROUND".to_string(), "or press Enter".to_string(), MUTED),
+            (None, _) => (
+                "START ROUND".to_string(),
+                "Can't reach the server · playing solo boards".to_string(),
+                AMBER,
+            ),
+        }
     }
 
     fn overlay_results(&mut self, ctx: &egui::Context) {
@@ -735,21 +879,101 @@ impl WordLegendApp {
 
             ui.add_space(12.0);
             app.rank_banner(ui);
-            app.word_tabs(ui);
 
-            ui.add_space(18.0);
-            if big_button(ui, "NEXT ROUND", ACCENT) {
-                app.game.start_round();
+            match app.game.round {
+                Some(round) => {
+                    ui.horizontal_top(|ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(300.0);
+                            app.leaderboard(ui, round);
+                        });
+                        ui.add_space(16.0);
+                        ui.vertical(|ui| {
+                            ui.set_width((ui.available_width()).max(200.0));
+                            app.word_tabs(ui);
+                        });
+                    });
+                    ui.add_space(18.0);
+                    // A shared scorecard is everyone's, so it runs out rather than
+                    // being skipped.
+                    let left = app.game.results_left.max(0.0);
+                    ui.label(
+                        egui::RichText::new(format!("Next round in {}s", left.ceil() as u32))
+                            .size(15.0)
+                            .color(if left <= 10.0 { AMBER } else { MUTED })
+                            .strong(),
+                    );
+                }
+                None => {
+                    app.word_tabs(ui);
+                    ui.add_space(18.0);
+                    if big_button(ui, "NEXT ROUND", ACCENT) {
+                        app.live.play_now(&mut app.game, app.now);
+                    }
+                    ui.add_space(6.0);
+                    let left = app.next_shared_round_in().unwrap_or(app.game.results_left.max(0.0));
+                    ui.label(
+                        egui::RichText::new(format!("Next round in {}s", left.ceil() as u32))
+                            .size(12.0)
+                            .color(if left <= 10.0 { AMBER } else { MUTED }),
+                    );
+                }
             }
-            ui.add_space(6.0);
-            // The scorecard is a shared window: everyone moves on together.
-            let left = app.game.results_left.max(0.0);
-            ui.label(
-                egui::RichText::new(format!("Next round in {}s", left.ceil() as u32))
-                    .size(12.0)
-                    .color(if left <= 10.0 { AMBER } else { MUTED }),
-            );
         });
+    }
+
+    /// Everyone who played this board, best first.
+    fn leaderboard(&self, ui: &mut egui::Ui, round: u64) {
+        let mine = self.identity.as_ref().map(|i| i.name.to_lowercase()).unwrap_or_default();
+        let table = self.live.leaderboard_for(round);
+        let place = table.and_then(|t| t.entries.iter().position(|e| e.name.to_lowercase() == mine));
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("LEADERBOARD").size(13.0).color(TEXT).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let text = match (table, place) {
+                    (Some(t), Some(i)) => format!("you're #{} of {}", i + 1, t.entries.len()),
+                    (Some(t), None) => format!("{} played", t.entries.len()),
+                    (None, _) => String::new(),
+                };
+                ui.label(egui::RichText::new(text).size(11.0).color(GOLD).strong());
+            });
+        });
+        ui.add_space(6.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("leaderboard")
+            .max_height(96.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                let Some(table) = table.filter(|t| !t.entries.is_empty()) else {
+                    let waiting = match self.live.name {
+                        NameStatus::Claimed => "Collecting scores…",
+                        _ => "Your name isn't registered yet, so this round can't be ranked.",
+                    };
+                    ui.label(egui::RichText::new(waiting).size(12.0).color(MUTED));
+                    return;
+                };
+                for (i, entry) in table.entries.iter().enumerate() {
+                    let me = Some(i) == place;
+                    let color = if me { GOLD } else { TEXT };
+                    ui.horizontal(|ui| {
+                        ui.add_sized(
+                            [26.0, 16.0],
+                            egui::Label::new(egui::RichText::new(format!("{}.", i + 1)).size(12.0).color(MUTED)),
+                        );
+                        ui.label(egui::RichText::new(&entry.name).size(13.0).color(color).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{} words", entry.words)).size(11.0).color(MUTED),
+                            );
+                            ui.label(
+                                egui::RichText::new(thousands(entry.score as usize)).size(13.0).color(color).strong(),
+                            );
+                        });
+                    });
+                }
+            });
     }
 
     /// The played board, with each tile bordered by how hard it worked.
@@ -1132,6 +1356,12 @@ fn style(ctx: &egui::Context) {
     ctx.set_visuals(visuals);
 }
 
+/// `133.4` -> `2:13`
+fn clock_text(seconds: f32) -> String {
+    let s = seconds.max(0.0).ceil() as u32;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
 /// `370105` -> `370,105`
 fn thousands(n: usize) -> String {
     let digits = n.to_string();
@@ -1249,6 +1479,23 @@ mod tests {
         let me = Identity { id: first.id, name: "wordfan".into() };
         app.identity = Some(me);
         assert!(!app.needs_signup());
+    }
+
+    /// The shared scorecard adds a leaderboard; with a long one it must still fit.
+    #[test]
+    fn the_shared_scorecard_with_a_full_leaderboard_fits() {
+        let mut app = app_after_round();
+        app.game.round = Some(7);
+        let entries = (0..40)
+            .map(|i| net::Entry { name: format!("player_{i:02}"), score: 20_000 - i * 400, words: 30 })
+            .collect();
+        app.live.show_leaderboard(net::Leaderboard { round: 7, entries });
+
+        for size in [Vec2::new(1000.0, 780.0), Vec2::new(1000.0, 600.0)] {
+            let screen = Rect::from_min_size(Pos2::ZERO, size);
+            let over = overlay_rect_at(&mut app, |a, ctx| a.overlay_results(ctx), size);
+            assert!(screen.contains_rect(over), "shared scorecard overflows {size:?}: {over:?}");
+        }
     }
 
     /// The card must stay on screen when the window is too short to hold it,

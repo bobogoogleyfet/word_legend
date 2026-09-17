@@ -3,6 +3,7 @@
 
 use crate::dictionary::{Dictionary, MIN_WORD_LEN};
 use crate::league::{RankChange, Ranking};
+use crate::net;
 use crate::themes::{Theme, Themes};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -109,6 +110,9 @@ pub struct Game {
     pub tile_uses: [[u32; SIZE]; SIZE],
     /// The category this board was built around, if any.
     pub theme: Option<String>,
+    /// The server's round number when this board is the one everyone is playing;
+    /// `None` for a board generated here for solo play.
+    pub round: Option<u64>,
     themes: Themes,
     pub score: u32,
     pub time_left: f32,
@@ -145,6 +149,7 @@ impl Game {
             tile_uses: [[0; SIZE]; SIZE],
             theme,
             themes,
+            round: None,
             score: 0,
             time_left: ROUND_SECONDS,
             results_left: RESULTS_SECONDS,
@@ -160,19 +165,45 @@ impl Game {
         }
     }
 
+    /// Start a solo round on a board generated here.
     pub fn start_round(&mut self) {
-        self.rank_change = None;
-
         let (grid, words, theme) = generate_board(&self.dictionary, &self.themes);
+        self.begin(grid, words, theme, None, ROUND_SECONDS);
+    }
+
+    /// Start the round everyone is playing, on the server's board, with however
+    /// much of its clock is left. Returns false if the board is not one this
+    /// client can read, so the caller can fall back rather than play garbage.
+    pub fn start_shared_round(&mut self, round: u64, board: &net::Board, time_left: f32) -> bool {
+        let Some(grid) = parse_grid(&board.grid) else { return false };
+        let mut words = solve_board(&self.dictionary, &grid);
+        let theme = board.theme.clone();
+        if let Some(def) = theme.as_ref().and_then(|t| self.themes.list.iter().find(|d| &d.name == t)) {
+            words.theme = collect_theme_words(&words, def);
+        }
+        self.begin(grid, words, theme, Some(round), time_left.clamp(0.0, ROUND_SECONDS));
+        true
+    }
+
+    fn begin(
+        &mut self,
+        grid: [[Cell; SIZE]; SIZE],
+        words: BoardWords,
+        theme: Option<String>,
+        round: Option<u64>,
+        time_left: f32,
+    ) {
+        self.rank_change = None;
         self.grid = grid;
         self.words = words;
         self.theme = theme;
+        self.round = round;
         self.tile_uses = [[0; SIZE]; SIZE];
         self.path.clear();
         self.found.clear();
         self.found_set.clear();
         self.score = 0;
-        self.time_left = ROUND_SECONDS;
+        self.time_left = time_left;
         self.results_left = RESULTS_SECONDS;
         self.phase = Phase::Playing;
         self.is_dragging = false;
@@ -187,14 +218,11 @@ impl Game {
             }
         }
 
-        // The scorecard is a timed window, not a screen you dismiss: the next round
-        // starts when it runs out, keeping every player on the same cycle.
+        // The scorecard is a timed window, not a screen you dismiss. What starts
+        // when it runs out -- the shared round or a solo one -- is decided by
+        // `live`, which knows whether there is a server to follow.
         if self.phase == Phase::Over {
-            self.results_left -= dt;
-            if self.results_left <= 0.0 {
-                self.results_left = 0.0;
-                self.start_round();
-            }
+            self.results_left = (self.results_left - dt).max(0.0);
             return;
         }
 
@@ -209,7 +237,10 @@ impl Game {
         }
     }
 
-    fn end_round(&mut self) {
+    pub fn end_round(&mut self) {
+        if self.phase != Phase::Playing {
+            return;
+        }
         self.phase = Phase::Over;
         self.results_left = RESULTS_SECONDS;
         self.path.clear();
@@ -407,6 +438,11 @@ impl Game {
         }
     }
 
+    /// The words found this round, in the order they were found.
+    pub fn found_words(&self) -> Vec<String> {
+        self.found.iter().map(|w| w.word.clone()).collect()
+    }
+
     pub fn has_found(&self, word: &str) -> bool {
         self.found_set.contains(word)
     }
@@ -433,6 +469,22 @@ pub fn word_points(len: usize) -> u32 {
         8 => 2_200,
         n => 2_200 + 400 * (n as u32 - 8),
     }
+}
+
+/// A board as the server sends it -- sixteen tiles, row by row -- in the form the
+/// game plays on. Themed boards plant any letter, so a tile is any single letter
+/// or the `qu` die; anything else is refused.
+pub fn parse_grid(tiles: &[String]) -> Option<[[Cell; SIZE]; SIZE]> {
+    if tiles.len() != SIZE * SIZE {
+        return None;
+    }
+    let mut cells = Vec::with_capacity(SIZE * SIZE);
+    for tile in tiles {
+        let tile = tile.to_ascii_lowercase();
+        let letters = LETTERS.iter().chain(["qu"].iter()).find(|face| **face == tile)?;
+        cells.push(Cell { letters });
+    }
+    Some(std::array::from_fn(|row| std::array::from_fn(|col| cells[row * SIZE + col])))
 }
 
 pub fn is_adjacent(a: Position, b: Position) -> bool {

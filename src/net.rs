@@ -101,14 +101,28 @@ impl Link {
     }
 }
 
+/// How a name claim went. "Taken" and "could not ask" need different handling:
+/// the first means pick another name, the second means play on and ask later.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Claim {
+    /// The server has this name down as ours.
+    Accepted(String),
+    /// The server answered and said no, with its reason.
+    Refused(String),
+    /// The server could not be asked.
+    Unreachable(String),
+}
+
 /// Everything the network has told us, read by the UI each frame.
 #[derive(Default)]
 pub struct Shared {
     pub round: Option<RoundInfo>,
     pub leaderboard: Option<Leaderboard>,
-    pub submitted: Option<Submitted>,
-    /// `Ok(name)` once a name is taken, `Err(reason)` if the server refused it.
-    pub claim: Option<Result<String, String>>,
+    /// The server's verdict on a submitted round, and which round it was for.
+    pub submitted: Option<(u64, Submitted)>,
+    /// Why the server turned a submission down, if it did.
+    pub submit_error: Option<String>,
+    pub claim: Option<Claim>,
     pub link: Option<Link>,
     /// Local clock reading when `round` arrived, to age it between polls.
     pub fetched_at: f64,
@@ -118,11 +132,49 @@ pub struct Shared {
 pub struct Client {
     base: String,
     shared: Arc<Mutex<Shared>>,
+    /// Tests set this: requests are written down in `sent` instead of going out,
+    /// so the round logic can be exercised without a server.
+    dry_run: bool,
+    sent: Arc<Mutex<Vec<String>>>,
 }
 
 impl Client {
     pub fn new(base: impl Into<String>) -> Self {
-        Client { base: base.into(), shared: Arc::new(Mutex::new(Shared::default())) }
+        Client {
+            base: base.into(),
+            shared: Arc::new(Mutex::new(Shared::default())),
+            dry_run: false,
+            sent: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// A client that records what it would have sent and sends nothing.
+    #[cfg(test)]
+    pub fn recording(base: impl Into<String>) -> Self {
+        Client { dry_run: true, ..Client::new(base) }
+    }
+
+    /// Requests a recording client was asked to make, as "METHOD path body".
+    #[cfg(test)]
+    pub fn sent(&self) -> Vec<String> {
+        self.sent.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// Send a request, or in a dry run note it down and drop it.
+    fn fetch(
+        &self,
+        request: ehttp::Request,
+        on_done: impl 'static + Send + FnOnce(ehttp::Result<ehttp::Response>),
+    ) {
+        if self.dry_run {
+            let path = request.url.strip_prefix(&self.base).unwrap_or(&request.url).to_string();
+            let body = String::from_utf8_lossy(&request.body).to_string();
+            if let Ok(mut sent) = self.sent.lock() {
+                sent.push(format!("{} {path} {body}", request.method).trim_end().to_string());
+            }
+            return;
+        }
+        ehttp::fetch(request, on_done);
     }
 
     pub fn is_configured(&self) -> bool {
@@ -148,7 +200,7 @@ impl Client {
         let shared = Arc::clone(&self.shared);
         let request = ehttp::Request::get(format!("{}/round", self.base));
 
-        ehttp::fetch(request, move |result| {
+        self.fetch(request, move |result| {
             let Ok(mut guard) = shared.lock() else { return };
             match parse::<RoundInfo>(result) {
                 Ok(info) => {
@@ -165,20 +217,27 @@ impl Client {
         if !self.is_configured() {
             // Nothing to claim against; the name is simply ours locally.
             if let Ok(mut guard) = self.shared.lock() {
-                guard.claim = Some(Ok(name.to_string()));
+                guard.claim = Some(Claim::Accepted(name.to_string()));
             }
             return;
+        }
+        if let Ok(mut guard) = self.shared.lock() {
+            guard.claim = None;
         }
         let shared = Arc::clone(&self.shared);
         let body = serde_json::to_vec(&ClaimRequest { id, name }).unwrap_or_default();
         let wanted = name.to_string();
 
-        ehttp::fetch(post(format!("{}/claim", self.base), body), move |result| {
+        self.fetch(post(format!("{}/claim", self.base), body), move |result| {
+            // A reply that is a refusal is an answer; a 5xx or no reply at all is not.
+            let answered = matches!(&result, Ok(r) if r.ok || r.status < 500);
+            let outcome = match parse::<serde_json::Value>(result) {
+                Ok(_) => Claim::Accepted(wanted),
+                Err(why) if answered => Claim::Refused(why),
+                Err(why) => Claim::Unreachable(why),
+            };
             let Ok(mut guard) = shared.lock() else { return };
-            guard.claim = Some(match parse::<serde_json::Value>(result) {
-                Ok(_) => Ok(wanted),
-                Err(why) => Err(why),
-            });
+            guard.claim = Some(outcome);
         });
     }
 
@@ -191,10 +250,12 @@ impl Client {
         let shared = Arc::clone(&self.shared);
         let body = serde_json::to_vec(&ScoreRequest { id, round, words }).unwrap_or_default();
 
-        ehttp::fetch(post(format!("{}/score", self.base), body), move |result| {
+        self.fetch(post(format!("{}/score", self.base), body), move |result| {
+            let answered = matches!(&result, Ok(r) if r.ok || r.status < 500);
             let Ok(mut guard) = shared.lock() else { return };
             match parse::<Submitted>(result) {
-                Ok(done) => guard.submitted = Some(done),
+                Ok(done) => guard.submitted = Some((round, done)),
+                Err(why) if answered => guard.submit_error = Some(why),
                 Err(why) => guard.link = Some(Link::Down(why)),
             }
         });
@@ -207,7 +268,7 @@ impl Client {
         let shared = Arc::clone(&self.shared);
         let url = format!("{}/leaderboard?round={round}", self.base);
 
-        ehttp::fetch(ehttp::Request::get(url), move |result| {
+        self.fetch(ehttp::Request::get(url), move |result| {
             let Ok(mut guard) = shared.lock() else { return };
             if let Ok(table) = parse::<Leaderboard>(result) {
                 guard.leaderboard = Some(table);
@@ -355,7 +416,7 @@ mod tests {
         client.claim_name("0123456789ABCDEF", "wordfan");
         let shared = client.shared();
         let guard = shared.lock().unwrap();
-        assert_eq!(guard.claim.as_ref().unwrap().as_deref(), Ok("wordfan"));
+        assert_eq!(guard.claim, Some(Claim::Accepted("wordfan".to_string())));
     }
 
     #[test]
