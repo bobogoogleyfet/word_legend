@@ -737,6 +737,35 @@ mod tests {
         assert_eq!(sent_matching(&live, "GET /round").len(), before, "an idle player's game kept asking for boards");
     }
 
+    /// Someone who joins with seconds to spare is on the table from the moment
+    /// they join, and sees everyone else's when the round ends.
+    #[test]
+    fn a_late_joiner_is_on_the_table_and_reads_it_like_everyone_else() {
+        let mut game = Game::new();
+        let mut live = online();
+        // Twenty seconds left of a three-minute round: late, but joinable.
+        serve(&live, 40, "play", 20.0, 0.0);
+        live.update(&mut game, Some(&me()), 0.0);
+        accept_name(&live);
+        live.update(&mut game, Some(&me()), 0.1);
+        live.play_now(&mut game, 0.1);
+        assert_eq!(game.phase, Phase::Playing, "a joinable round was not joined");
+        assert!(game.time_left <= 20.0);
+
+        // Reported at once, so the others see them before the round ends.
+        live.update(&mut game, Some(&me()), 0.2);
+        let reports = sent_matching(&live, "POST /progress");
+        assert_eq!(reports.len(), 1, "a late joiner was not put on the table: {reports:?}");
+        assert!(reports[0].contains("\"round\":40"));
+
+        // The round ends: their score is handed in, and they read the table.
+        live.update(&mut game, Some(&me()), 21.0);
+        assert_eq!(game.phase, Phase::Over);
+        assert_eq!(sent_matching(&live, "POST /score").len(), 1);
+        live.update(&mut game, Some(&me()), 22.5);
+        assert_eq!(sent_matching(&live, "GET /leaderboard?round=40").len(), 1, "a late joiner does not read the table");
+    }
+
     #[test]
     fn leaving_a_round_hands_the_score_in_now_and_stays_out_of_the_next() {
         let mut game = Game::new();
