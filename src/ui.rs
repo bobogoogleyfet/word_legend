@@ -3,7 +3,7 @@
 use crate::clipboard::Paste;
 use crate::game::{Feedback, Game, Phase, Position, RESULTS_SECONDS, ROUND_SECONDS, SIZE};
 use crate::identity::{self, Identity};
-use crate::league::{Movement, FORM_GAMES, LEAGUES, MIN_GAMES_TO_MOVE};
+use crate::league::{GameRecord, Movement, FORM_GAMES, HISTORY_GAMES, LEAGUES, MIN_GAMES_TO_MOVE};
 use crate::live::{Live, NameStatus, MIN_JOIN_SECONDS};
 use crate::net::{self, Link};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
@@ -20,6 +20,34 @@ const RED: Color32 = Color32::from_rgb(0xff, 0x5c, 0x5c);
 const AMBER: Color32 = Color32::from_rgb(0xff, 0xb4, 0x54);
 const GOLD: Color32 = Color32::from_rgb(0xff, 0xd1, 0x66);
 const BLUE: Color32 = Color32::from_rgb(0x5b, 0x8c, 0xff);
+
+/// The history chart's two series: each game's score, and the rank average after
+/// it. Blue and yellow from the reference palette's dark steps, validated against
+/// PANEL: both clear 3:1, and they stay far apart under every colour-vision type.
+const SERIES_SCORES: Color32 = Color32::from_rgb(0x39, 0x87, 0xe5);
+const SERIES_AVERAGE: Color32 = Color32::from_rgb(0xc9, 0x85, 0x00);
+
+/// The logo's tile colours, in order: the reference palette's dark categorical
+/// steps, deep enough to carry white letters.
+const LOGO_TILES: [Color32; 8] = [
+    Color32::from_rgb(0x39, 0x87, 0xe5),
+    Color32::from_rgb(0xd9, 0x59, 0x26),
+    Color32::from_rgb(0x19, 0x9e, 0x70),
+    Color32::from_rgb(0xc9, 0x85, 0x00),
+    Color32::from_rgb(0xd5, 0x51, 0x81),
+    Color32::from_rgb(0x00, 0x83, 0x00),
+    Color32::from_rgb(0x90, 0x85, 0xe9),
+    Color32::from_rgb(0xe6, 0x67, 0x67),
+];
+
+/// The scorecard's tabs. The leaderboard opens first on a shared round.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ResultsTab {
+    Leaderboard,
+    Common,
+    Obscure,
+    Highlight,
+}
 
 /// First-run screen state, kept out of the app struct's main body.
 struct Signup {
@@ -90,8 +118,10 @@ pub struct WordLegendApp {
     identity: Option<Identity>,
     /// First-run screen state.
     signup: Signup,
-    /// Which of the Common / Obscure / Theme tabs the scorecard is showing.
-    results_tab: usize,
+    /// Which tab the scorecard is showing.
+    results_tab: ResultsTab,
+    /// The stats page is open.
+    show_stats: bool,
     /// Where the cursor was last frame, so a drag can be traced as a segment
     /// rather than sampled as isolated points.
     drag_from: Option<Pos2>,
@@ -110,7 +140,8 @@ impl WordLegendApp {
             now: 0.0,
             signup: Signup::new(identity.is_none()),
             identity,
-            results_tab: 0,
+            results_tab: ResultsTab::Leaderboard,
+            show_stats: false,
             drag_from: None,
             elapsed: 0.0,
             code_copied_at: None,
@@ -165,7 +196,7 @@ impl WordLegendApp {
                 .show(ctx, |ui| self.found_panel(ui));
         }
 
-        let board_margin = if narrow { egui::Margin::same(10) } else { egui::Margin::same(16) };
+        let board_margin = if narrow { egui::Margin::same(4) } else { egui::Margin::same(16) };
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(BG).inner_margin(board_margin))
             .show(ctx, |ui| self.board_area(ui));
@@ -176,7 +207,15 @@ impl WordLegendApp {
             return;
         }
 
+        // A round starting takes over the screen, and the next scorecard opens on
+        // its leaderboard again.
+        if self.game.phase == Phase::Playing {
+            self.show_stats = false;
+            self.results_tab = ResultsTab::Leaderboard;
+        }
+
         match self.game.phase {
+            _ if self.show_stats => self.overlay_stats(ctx),
             Phase::Ready => self.overlay_ready(ctx),
             Phase::Over => self.overlay_results(ctx),
             Phase::Playing => {}
@@ -691,7 +730,11 @@ impl WordLegendApp {
     fn board(&mut self, ui: &mut egui::Ui, board_size: f32) {
         let (response, painter) =
             ui.allocate_painter(Vec2::splat(board_size), Sense::click_and_drag());
-        let geom = BoardGeometry::new(response.rect.min, board_size);
+        // On a phone the board runs nearly edge to edge, with tighter gaps. Drags
+        // are judged on circles sized to the tile, so the gap does not make
+        // diagonals any harder.
+        let gap = if is_narrow(ui.ctx()) { PHONE_GAP } else { DESKTOP_GAP };
+        let geom = BoardGeometry::with_gap(response.rect.min, board_size, gap);
 
         self.handle_board_input(&response, &geom);
 
@@ -867,74 +910,66 @@ impl WordLegendApp {
 
     // --- overlays ----------------------------------------------------------
 
+    /// The home screen: the logo, a welcome, and PLAY. On a phone it is the whole
+    /// screen rather than a card over the board.
     fn overlay_ready(&mut self, ctx: &egui::Context) {
-        self.overlay(ctx, |app, ui| {
-            let title = if is_narrow(ui.ctx()) { 34.0 } else { 46.0 };
-            ui.label(egui::RichText::new("WORD LEGEND").size(title).color(TEXT).strong());
-            ui.label(
-                egui::RichText::new(format!("{} League", LEAGUES[app.game.ranking.league].name))
-                    .size(16.0)
-                    .color(league_color(app.game.ranking.league))
-                    .strong(),
-            );
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new(format!(
-                    "Three minutes a round. Your rank is your average over the last {FORM_GAMES}."
-                ))
-                .size(13.0)
-                .color(MUTED),
-            );
+        self.page(ctx, true, |app, ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(8.0);
+                logo(ui);
+                ui.add_space(22.0);
 
-            ui.add_space(18.0);
-            let panel_width = ui.available_width().min(340.0);
-            ui.allocate_ui_with_layout(
-                Vec2::new(panel_width, 0.0),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_width(panel_width);
-                    app.form_panel(ui);
-                },
-            );
-            ui.add_space(16.0);
+                ui.label(egui::RichText::new("Welcome,").size(16.0).color(MUTED));
+                let name = app.identity.as_ref().map(|i| i.name.clone()).unwrap_or_default();
+                ui.label(egui::RichText::new(name).size(30.0).color(TEXT).strong());
+                let rank = &app.game.ranking;
+                ui.horizontal(|ui| {
+                    // Centre the pair as one line.
+                    let league = egui::RichText::new(LEAGUES[rank.league].name)
+                        .size(15.0)
+                        .color(league_color(rank.league))
+                        .strong();
+                    let average = egui::RichText::new(format!("  ·  {} avg", thousands(rank.average() as usize)))
+                        .size(15.0)
+                        .color(MUTED);
+                    let width = ui.fonts(|f| {
+                        let font = FontId::proportional(15.0);
+                        f.layout_no_wrap(LEAGUES[rank.league].name.to_string(), font.clone(), TEXT).size().x
+                            + f.layout_no_wrap(format!("  ·  {} avg", thousands(rank.average() as usize)), font, TEXT).size().x
+                    });
+                    ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+                    ui.label(league);
+                    ui.label(average);
+                });
 
-            for line in [
-                "Drag across touching letters — any direction, diagonals included",
-                "Longer words are worth far more: a 7 beats four 3s",
-            ] {
-                ui.label(egui::RichText::new(format!("•  {line}")).size(13.0).color(MUTED));
-            }
-
-            ui.add_space(12.0);
-            ui.label(
-                egui::RichText::new(format!(
-                    "Boards built from {} common words · {} more accepted if you find them",
-                    thousands(app.game.dictionary.common_count()),
-                    thousands(app.game.dictionary.word_count() - app.game.dictionary.common_count())
-                ))
-                .size(12.0)
-                .color(MUTED),
-            );
-
-            ui.add_space(18.0);
-            let (button, note, color) = app.join_prompt();
-            if big_button(ui, &button, ACCENT) {
-                app.live.play_now(&mut app.game, app.now);
-            }
-            ui.add_space(8.0);
-            ui.label(egui::RichText::new(note).size(12.0).color(color));
-
-            // The code is only shown once at signup; this is the way back to it.
-            if let Some(code) = app.identity.as_ref().map(|me| me.recovery_code()) {
-                ui.add_space(10.0);
-                let copied = app.code_copied_at.is_some_and(|t| app.now - t < 3.0);
-                let (label, color) =
-                    if copied { ("Recovery code copied", GREEN) } else { ("Copy my recovery code", ACCENT) };
-                if ui.link(egui::RichText::new(label).size(12.0).color(color)).clicked() {
-                    ui.ctx().copy_text(code);
-                    app.code_copied_at = Some(app.now);
+                ui.add_space(26.0);
+                let (_, note, color) = app.join_prompt();
+                if play_band(ui) {
+                    app.live.play_now(&mut app.game, app.now);
                 }
-            }
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(note).size(13.0).color(color));
+
+                ui.add_space(26.0);
+                ui.horizontal(|ui| {
+                    let buttons = 2.0;
+                    let width = 72.0 * buttons + 16.0;
+                    ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+                    if icon_button(ui, "Stats", draw_chart_icon).clicked() {
+                        app.show_stats = true;
+                    }
+                    ui.add_space(16.0);
+                    let copied = app.code_copied_at.is_some_and(|t| app.now - t < 3.0);
+                    let label = if copied { "Copied" } else { "My code" };
+                    if icon_button(ui, label, if copied { draw_tick_icon } else { draw_copy_icon }).clicked() {
+                        if let Some(code) = app.identity.as_ref().map(|me| me.recovery_code()) {
+                            ui.ctx().copy_text(code);
+                            app.code_copied_at = Some(app.now);
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+            });
         });
     }
 
@@ -969,6 +1004,9 @@ impl WordLegendApp {
     }
 
     fn overlay_results(&mut self, ctx: &egui::Context) {
+        if is_narrow(ctx) {
+            return self.page(ctx, false, |app, ui| app.results_page(ui));
+        }
         self.overlay(ctx, |app, ui| {
             ui.label(egui::RichText::new("TIME'S UP").size(15.0).color(MUTED).strong());
             ui.label(egui::RichText::new(format!("{}", app.game.score)).size(46.0).color(GOLD).strong());
@@ -1077,6 +1115,174 @@ impl WordLegendApp {
         });
     }
 
+    /// The scorecard on a phone: one screen, no scrolling but the word list's own.
+    /// The board and its numbers side by side at the top, the tabs under them, the
+    /// list filling what is left, and the countdown pinned to the bottom.
+    fn results_page(&mut self, ui: &mut egui::Ui) {
+        const FOOTER: f32 = 40.0;
+        let width = ui.available_width();
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("TIME'S UP").size(12.0).color(MUTED).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let rank = &self.game.ranking;
+                ui.label(egui::RichText::new(format!("{} avg", thousands(rank.average() as usize))).size(12.0).color(MUTED));
+                ui.label(
+                    egui::RichText::new(LEAGUES[rank.league].name.to_uppercase())
+                        .size(12.0)
+                        .color(league_color(rank.league))
+                        .strong(),
+                );
+            });
+        });
+        ui.add_space(6.0);
+
+        let board = (width * 0.46).min(210.0);
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(board);
+                self.used_board(ui, board);
+            });
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                self.compact_stats(ui);
+            });
+        });
+
+        ui.add_space(4.0);
+        self.rank_banner(ui);
+        self.unplayed_notice(ui);
+
+        let tabs = self.tab_list();
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for (tab, label) in &tabs {
+                let selected = self.current_tab() == *tab;
+                let text = egui::RichText::new(label).size(12.0).color(if selected { TEXT } else { MUTED }).strong();
+                if ui.selectable_label(selected, text).clicked() {
+                    self.results_tab = *tab;
+                }
+            }
+        });
+        ui.separator();
+
+        let list_height = (ui.available_height() - FOOTER).max(80.0);
+        egui::ScrollArea::vertical()
+            .id_salt("results_list")
+            .max_height(list_height)
+            .min_scrolled_height(list_height)
+            .auto_shrink([false, false])
+            .show(ui, |ui| match (self.current_tab(), self.game.round) {
+                (ResultsTab::Leaderboard, Some(round)) => self.leaderboard_rows(ui, round),
+                (tab, _) => self.word_columns(ui, tab),
+            });
+
+        ui.add_space(6.0);
+        ui.vertical_centered(|ui| {
+            if self.game.round.is_some() {
+                let left = self.game.results_left.max(0.0);
+                ui.label(
+                    egui::RichText::new(format!("Next round in {}s", left.ceil() as u32))
+                        .size(15.0)
+                        .color(if left <= 10.0 { AMBER } else { MUTED })
+                        .strong(),
+                );
+            } else if ui.button(egui::RichText::new("NEXT ROUND").size(14.0).strong()).clicked() {
+                self.live.play_now(&mut self.game, self.now);
+            }
+        });
+    }
+
+    /// The round's numbers, narrow enough to sit beside the board on a phone.
+    fn compact_stats(&self, ui: &mut egui::Ui) {
+        let g = &self.game;
+        ui.label(egui::RichText::new(thousands(g.score as usize)).size(26.0).color(GOLD).strong());
+        ui.label(
+            egui::RichText::new(format!("of {} possible", thousands(g.board_par() as usize))).size(11.0).color(MUTED),
+        );
+        ui.add_space(6.0);
+        let rows = [
+            ("Words found", format!("{} / {}", g.found_count(), g.findable_count())),
+            ("Avg points/word", format!("{:.0}", g.average_points())),
+            ("Time per word", format!("{:.1}s", g.seconds_per_word())),
+            ("Avg word length", format!("{:.1}", g.average_word_length())),
+            ("Board type", g.board_type()),
+        ];
+        for (label, value) in rows {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(label).size(11.0).color(MUTED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(value).size(12.0).color(TEXT).strong());
+                });
+            });
+        }
+    }
+
+    /// The tabs this scorecard offers, with counts: found of total for the word
+    /// lists, players for the leaderboard.
+    fn tab_list(&self) -> Vec<(ResultsTab, String)> {
+        let found_of = |list: &mut dyn Iterator<Item = &String>| {
+            let words: Vec<&String> = list.collect();
+            let found = words.iter().filter(|w| self.game.has_found(w)).count();
+            format!("{found}/{}", words.len())
+        };
+        let (highlight, highlighted) = self.game.highlight_tab();
+        let mut tabs = Vec::new();
+        if let Some(round) = self.game.round {
+            let players = self.live.leaderboard_for(round).map(|t| t.entries.len()).unwrap_or(0);
+            tabs.push((ResultsTab::Leaderboard, format!("Players ({players})")));
+        }
+        tabs.push((ResultsTab::Common, format!("Common ({})", found_of(&mut self.game.words.common.iter()))));
+        tabs.push((ResultsTab::Obscure, format!("Obscure ({})", found_of(&mut self.game.words.obscure.iter()))));
+        tabs.push((ResultsTab::Highlight, format!("{highlight} ({})", found_of(&mut highlighted.into_iter()))));
+        tabs
+    }
+
+    /// The selected tab, or Common where the leaderboard is not on offer.
+    fn current_tab(&self) -> ResultsTab {
+        match self.results_tab {
+            ResultsTab::Leaderboard if self.game.round.is_none() => ResultsTab::Common,
+            tab => tab,
+        }
+    }
+
+    /// A word list in columns, each word with its points; found words picked out.
+    fn word_columns(&self, ui: &mut egui::Ui, tab: ResultsTab) {
+        let (_, highlighted) = self.game.highlight_tab();
+        let words: Vec<&String> = match tab {
+            ResultsTab::Obscure => self.game.words.obscure.iter().collect(),
+            ResultsTab::Highlight => highlighted,
+            _ => self.game.words.common.iter().collect(),
+        };
+        if words.is_empty() {
+            ui.label(egui::RichText::new("Nothing in this list for this board.").size(12.0).color(MUTED));
+            return;
+        }
+        let columns = ((ui.available_width() / 120.0).floor() as usize).clamp(1, 4);
+        let per_column = words.len().div_ceil(columns);
+        ui.columns(columns, |cols| {
+            for (i, word) in words.iter().enumerate() {
+                let col = &mut cols[i / per_column];
+                let found = self.game.has_found(word);
+                col.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(word.as_str())
+                            .size(13.0)
+                            .color(if found { GREEN } else { TEXT }),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(crate::game::word_points(word.len()).to_string())
+                                .size(12.0)
+                                .color(MUTED),
+                        );
+                    });
+                });
+            }
+        });
+    }
+
     /// Everyone who played this board, best first.
     fn leaderboard(&self, ui: &mut egui::Ui, round: u64) {
         let mine = self.identity.as_ref().map(|i| i.name.to_lowercase()).unwrap_or_default();
@@ -1100,35 +1306,38 @@ impl WordLegendApp {
             .id_salt("leaderboard")
             .max_height(96.0)
             .auto_shrink([false, true])
-            .show(ui, |ui| {
-                let Some(table) = table.filter(|t| !t.entries.is_empty()) else {
-                    let waiting = match self.live.name {
-                        NameStatus::Claimed => "Collecting scores…",
-                        _ => "Your name isn't registered yet, so this round can't be ranked.",
-                    };
-                    ui.label(egui::RichText::new(waiting).size(12.0).color(MUTED));
-                    return;
-                };
-                for (i, entry) in table.entries.iter().enumerate() {
-                    let me = Some(i) == place;
-                    let color = if me { GOLD } else { TEXT };
-                    ui.horizontal(|ui| {
-                        ui.add_sized(
-                            [26.0, 16.0],
-                            egui::Label::new(egui::RichText::new(format!("{}.", i + 1)).size(12.0).color(MUTED)),
-                        );
-                        ui.label(egui::RichText::new(&entry.name).size(13.0).color(color).strong());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                egui::RichText::new(format!("{} words", entry.words)).size(11.0).color(MUTED),
-                            );
-                            ui.label(
-                                egui::RichText::new(thousands(entry.score as usize)).size(13.0).color(color).strong(),
-                            );
-                        });
-                    });
-                }
+            .show(ui, |ui| self.leaderboard_rows(ui, round));
+    }
+
+    /// The leaderboard's rows, or why there are none yet.
+    fn leaderboard_rows(&self, ui: &mut egui::Ui, round: u64) {
+        let mine = self.identity.as_ref().map(|i| i.name.to_lowercase()).unwrap_or_default();
+        let table = self.live.leaderboard_for(round);
+        let place = table.and_then(|t| t.entries.iter().position(|e| e.name.to_lowercase() == mine));
+
+        let Some(table) = table.filter(|t| !t.entries.is_empty()) else {
+            let waiting = match self.live.name {
+                NameStatus::Claimed => "Collecting scores…",
+                _ => "Your name isn't registered yet, so this round can't be ranked.",
+            };
+            ui.label(egui::RichText::new(waiting).size(12.0).color(MUTED));
+            return;
+        };
+        for (i, entry) in table.entries.iter().enumerate() {
+            let me = Some(i) == place;
+            let color = if me { GOLD } else { TEXT };
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [26.0, 16.0],
+                    egui::Label::new(egui::RichText::new(format!("{}.", i + 1)).size(12.0).color(MUTED)),
+                );
+                ui.label(egui::RichText::new(&entry.name).size(13.0).color(color).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(format!("{} words", entry.words)).size(11.0).color(MUTED));
+                    ui.label(egui::RichText::new(thousands(entry.score as usize)).size(13.0).color(color).strong());
+                });
             });
+        }
     }
 
     /// The played board, with each tile bordered by how hard it worked.
@@ -1200,29 +1409,29 @@ impl WordLegendApp {
 
     /// Common / Obscure / Theme, the way WordHero split its word list.
     fn word_tabs(&mut self, ui: &mut egui::Ui) {
-        // The third tab is the board's own: its theme, its superword, or failing
-        // both its longest words.
-        let (highlight, highlighted) = self.game.highlight_tab();
-        let counts = [self.game.words.common.len(), self.game.words.obscure.len(), highlighted.len()];
-        let names = ["Common".to_string(), "Obscure".to_string(), highlight];
+        // The leaderboard has its own column on a desktop; its tab is left out.
+        let tabs: Vec<(ResultsTab, String)> =
+            self.tab_list().into_iter().filter(|(t, _)| *t != ResultsTab::Leaderboard).collect();
+        let current = match self.current_tab() {
+            ResultsTab::Leaderboard => ResultsTab::Common,
+            tab => tab,
+        };
 
         ui.horizontal(|ui| {
-            for (i, name) in names.iter().enumerate() {
-                let selected = self.results_tab == i;
-                let text = egui::RichText::new(format!("{name} ({})", counts[i]))
-                    .size(13.0)
-                    .color(if selected { TEXT } else { MUTED })
-                    .strong();
+            for (tab, label) in &tabs {
+                let selected = current == *tab;
+                let text = egui::RichText::new(label).size(13.0).color(if selected { TEXT } else { MUTED }).strong();
                 if ui.selectable_label(selected, text).clicked() {
-                    self.results_tab = i;
+                    self.results_tab = *tab;
                 }
             }
         });
 
-        let words: Vec<&String> = match self.results_tab {
-            0 => self.game.words.common.iter().collect(),
-            1 => self.game.words.obscure.iter().collect(),
-            _ => highlighted,
+        let (_, highlighted) = self.game.highlight_tab();
+        let words: Vec<&String> = match current {
+            ResultsTab::Obscure => self.game.words.obscure.iter().collect(),
+            ResultsTab::Highlight => highlighted,
+            _ => self.game.words.common.iter().collect(),
         };
 
         ui.add_space(6.0);
@@ -1231,11 +1440,7 @@ impl WordLegendApp {
             .max_height(96.0)
             .show(ui, |ui| {
                 if words.is_empty() {
-                    ui.label(
-                        egui::RichText::new("Nothing in this list for this board.")
-                            .size(12.0)
-                            .color(MUTED),
-                    );
+                    ui.label(egui::RichText::new("Nothing in this list for this board.").size(12.0).color(MUTED));
                     return;
                 }
                 ui.horizontal_wrapped(|ui| {
@@ -1279,7 +1484,7 @@ impl WordLegendApp {
             ui.label(egui::RichText::new("avg").size(12.0).color(MUTED));
         });
 
-        self.form_line(ui);
+        self.history_chart(ui, 56.0, FORM_GAMES, false);
 
         ui.add_space(6.0);
 
@@ -1325,105 +1530,219 @@ impl WordLegendApp {
         }
     }
 
-    /// The last ten rounds as a line, newest on the right, against a hairline at
-    /// their average -- the number the ladder actually uses. Hovering picks out a
-    /// round and reads it off.
-    fn form_line(&self, ui: &mut egui::Ui) {
-        const HEIGHT: f32 = 46.0;
-        /// Room at the right for the average line's label, clear of the plot.
-        const LABEL_GUTTER: f32 = 30.0;
-        /// Markers are 8px across plus a ring; keep them inside the plot.
-        const PAD: f32 = 6.0;
+    /// Game scores and the rank average as two lines, newest on the right: each
+    /// game against where it left the average, so a run of good or bad games shows
+    /// as the average bending. `axes` adds gridlines and labels for the stats page;
+    /// without them it is a compact trend for the rank panel. Hovering snaps to the
+    /// nearest game and reads both values off.
+    fn history_chart(&self, ui: &mut egui::Ui, height: f32, limit: usize, axes: bool) {
+        let history = &self.game.ranking.history;
+        let games: Vec<GameRecord> = history.iter().skip(history.len().saturating_sub(limit)).copied().collect();
 
-        let rank = &self.game.ranking;
-        let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), HEIGHT), Sense::hover());
-        let plot = Rect::from_min_max(
-            rect.min + Vec2::new(PAD, PAD),
-            Pos2::new(rect.max.x - LABEL_GUTTER, rect.max.y - PAD),
-        );
+        // Two series, so a legend, always; identity never rests on colour alone.
+        ui.horizontal(|ui| {
+            legend_key(ui, SERIES_SCORES, "Game scores");
+            ui.add_space(12.0);
+            legend_key(ui, SERIES_AVERAGE, "Average");
+        });
+
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+        let (left, bottom) = if axes { (38.0, 18.0) } else { (6.0, 6.0) };
+        let plot = Rect::from_min_max(rect.min + Vec2::new(left, 6.0), Pos2::new(rect.max.x - 8.0, rect.max.y - bottom));
         let painter = ui.painter();
         let grid = Stroke::new(1.0_f32, TILE_EDGE);
-        let color = league_color(rank.league);
 
-        // The baseline is zero, so a line's height is an honest share of the best.
-        painter.line_segment([plot.left_bottom(), plot.right_bottom()], grid);
-
-        let scores: Vec<u32> = rank.recent.iter().copied().collect();
-        if scores.is_empty() {
-            painter.text(
-                plot.center(),
-                Align2::CENTER_CENTER,
-                "Your rounds will chart here",
-                FontId::proportional(11.0),
-                MUTED,
-            );
+        if games.is_empty() {
+            painter.line_segment([plot.left_bottom(), plot.right_bottom()], grid);
+            painter.text(plot.center(), Align2::CENTER_CENTER, "Your rounds will chart here", FontId::proportional(11.0), MUTED);
             return;
         }
 
-        let average = rank.average();
-        let peak = scores.iter().copied().max().unwrap_or(0).max(average).max(1) as f32;
-        let y = |score: u32| plot.max.y - (score as f32 / peak) * plot.height();
-        // Fixed slots, filled from the right: the newest round always sits at the
-        // right edge, and the line grows leftward until there are ten.
-        let step = plot.width() / (FORM_GAMES - 1) as f32;
-        let first_slot = FORM_GAMES - scores.len();
-        let points: Vec<Pos2> = scores
-            .iter()
-            .enumerate()
-            .map(|(i, s)| Pos2::new(plot.min.x + (first_slot + i) as f32 * step, y(*s)))
-            .collect();
+        let peak = games.iter().map(|g| g.score.max(g.average)).max().unwrap_or(1).max(1);
+        let (top, step) = nice_scale(peak);
+        // Zero baseline: a line's height is an honest share of the scale.
+        let y = |v: u32| plot.max.y - v as f32 / top as f32 * plot.height();
 
-        // The average, as a recessive solid hairline with its label in the gutter.
-        let avg_y = y(average);
-        painter.line_segment([Pos2::new(plot.min.x, avg_y), Pos2::new(plot.max.x, avg_y)], grid);
-        painter.text(
-            Pos2::new(rect.max.x, avg_y),
-            Align2::RIGHT_CENTER,
-            "avg",
-            FontId::proportional(10.0),
-            MUTED,
-        );
+        if axes {
+            let mut value = 0;
+            while value <= top {
+                let at = y(value);
+                painter.line_segment([Pos2::new(plot.min.x, at), Pos2::new(plot.max.x, at)], grid);
+                painter.text(Pos2::new(plot.min.x - 6.0, at), Align2::RIGHT_CENTER, short_number(value), FontId::proportional(10.0), MUTED);
+                value += step;
+            }
+        } else {
+            painter.line_segment([plot.left_bottom(), plot.right_bottom()], grid);
+        }
 
-        // Nearest round to the pointer, by x: readers aim at a round, not a 2px line.
-        let hovered = response.hover_pos().map(|p| {
-            let slot = ((p.x - plot.min.x) / step).round().clamp(first_slot as f32, (FORM_GAMES - 1) as f32);
-            slot as usize - first_slot
-        });
+        // Fixed slots, newest at the right edge: the line grows leftward.
+        let slots = limit.max(2);
+        let dx = plot.width() / (slots - 1) as f32;
+        let first = slots - games.len();
+        let x = |i: usize| plot.min.x + (first + i) as f32 * dx;
+
+        if axes {
+            let label = |at: f32, text: &str| {
+                painter.text(Pos2::new(at, plot.max.y + 4.0), Align2::CENTER_TOP, text, FontId::proportional(10.0), MUTED);
+            };
+            label(plot.max.x - 14.0, "Newest");
+            let mut ago = 10;
+            while ago < games.len() {
+                let at = x(games.len() - 1 - ago);
+                if at - plot.min.x > 34.0 {
+                    label(at, &format!("-{ago}"));
+                }
+                ago += 10;
+            }
+            if games.len() > 1 {
+                label(x(0) + 12.0, "Oldest");
+            }
+        }
+
+        let hovered = response
+            .hover_pos()
+            .filter(|p| plot.expand(10.0).contains(*p))
+            .map(|p| (((p.x - plot.min.x) / dx).round() as isize - first as isize).clamp(0, games.len() as isize - 1) as usize);
         if let Some(i) = hovered {
-            let x = points[i].x;
-            painter.line_segment([Pos2::new(x, plot.min.y), Pos2::new(x, plot.max.y)], grid);
+            painter.line_segment([Pos2::new(x(i), plot.min.y), Pos2::new(x(i), plot.max.y)], grid);
         }
 
-        if points.len() > 1 {
-            painter.add(egui::Shape::line(points.clone(), Stroke::new(2.0_f32, color)));
-        }
-        for (i, at) in points.iter().enumerate() {
-            let radius = if hovered == Some(i) { 5.0 } else { 4.0 };
-            // A ring in the panel colour keeps each marker legible where it sits on
-            // the line or the average.
-            painter.circle(*at, radius, color, Stroke::new(2.0_f32, PANEL));
+        for (color, value) in [(SERIES_SCORES, (|g: &GameRecord| g.score) as fn(&GameRecord) -> u32), (SERIES_AVERAGE, |g: &GameRecord| g.average)] {
+            let points: Vec<Pos2> = games.iter().enumerate().map(|(i, g)| Pos2::new(x(i), y(value(g)))).collect();
+            if points.len() > 1 {
+                painter.add(egui::Shape::line(points.clone(), Stroke::new(2.0_f32, color)));
+            }
+            // An end dot on the newest game, and on the one under the pointer, each
+            // ringed in the panel colour so it reads where the lines cross.
+            let marked = std::iter::once(points.len() - 1).chain(hovered);
+            for i in marked {
+                painter.circle(points[i], 4.0, color, Stroke::new(2.0_f32, PANEL));
+            }
         }
 
         if let Some(i) = hovered {
-            let ago = scores.len() - 1 - i;
+            let game = games[i];
+            let ago = games.len() - 1 - i;
             let when = match ago {
-                0 => "Last round".to_string(),
-                1 => "1 round ago".to_string(),
-                n => format!("{n} rounds ago"),
+                0 => "Last game".to_string(),
+                1 => "1 game ago".to_string(),
+                n => format!("{n} games ago"),
             };
             response.on_hover_ui_at_pointer(|ui| {
                 ui.label(egui::RichText::new(when).size(11.0).color(MUTED));
-                ui.label(
-                    egui::RichText::new(thousands(scores[i] as usize)).size(14.0).color(TEXT).strong(),
-                );
-                ui.label(
-                    egui::RichText::new(format!("avg {}", thousands(average as usize)))
-                        .size(11.0)
-                        .color(MUTED),
-                );
+                ui.label(egui::RichText::new(format!("Score {}", thousands(game.score as usize))).size(13.0).color(TEXT).strong());
+                ui.label(egui::RichText::new(format!("Average {}", thousands(game.average as usize))).size(12.0).color(TEXT));
+                ui.label(egui::RichText::new(format!("{} words", game.words)).size(11.0).color(MUTED));
             });
         }
+    }
+
+    /// The stats page: the rank chart over the last fifty games, and the best game,
+    /// all-time averages and totals under it.
+    fn overlay_stats(&mut self, ctx: &egui::Context) {
+        self.page(ctx, true, |app, ui| {
+            let narrow = is_narrow(ui.ctx());
+            let (league, average, best_score) =
+                (app.game.ranking.league, app.game.ranking.average(), app.game.ranking.best_score);
+            let life = app.game.ranking.lifetime.clone();
+
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("STATS").size(22.0).color(TEXT).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(egui::RichText::new("Back").size(14.0)).clicked() {
+                        app.show_stats = false;
+                    }
+                });
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("League:").size(14.0).color(MUTED));
+                ui.label(egui::RichText::new(LEAGUES[league].name).size(14.0).color(league_color(league)).strong());
+            });
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Rank average:").size(14.0).color(MUTED));
+                ui.label(egui::RichText::new(thousands(average as usize)).size(14.0).color(TEXT).strong());
+            });
+            ui.add_space(10.0);
+
+            app.stacked(ui, |app, ui| app.history_chart(ui, if narrow { 190.0 } else { 230.0 }, HISTORY_GAMES, true));
+            ui.add_space(14.0);
+
+            let per_game = |total: u64| if life.games == 0 { "—".to_string() } else { thousands((total / life.games) as usize) };
+            let best_word = match &life.best_word {
+                Some((word, points)) => format!("{word} ({points} points)"),
+                None => "—".to_string(),
+            };
+            let blocks: [(&str, Vec<(&str, String)>); 3] = [
+                ("Best Game", vec![
+                    ("Score", thousands(best_score as usize)),
+                    ("Word", best_word),
+                    ("Most words", life.most_words.to_string()),
+                ]),
+                ("All-time Averages", vec![
+                    ("Score/game", per_game(life.score)),
+                    ("Words/game", per_game(life.words)),
+                    ("Games played", thousands(life.games as usize)),
+                ]),
+                ("Totals", vec![
+                    ("Score", thousands(life.score as usize)),
+                    ("Words", thousands(life.words as usize)),
+                ]),
+            ];
+
+            if narrow {
+                for (title, rows) in &blocks {
+                    app.stacked(ui, |_, ui| stat_block(ui, title, rows));
+                    ui.add_space(10.0);
+                }
+            } else {
+                ui.columns(3, |cols| {
+                    for (col, (title, rows)) in cols.iter_mut().zip(&blocks) {
+                        stat_block(col, title, rows);
+                    }
+                });
+            }
+
+            ui.add_space(16.0);
+            ui.vertical_centered(|ui| {
+                if big_button(ui, "BACK", ACCENT) {
+                    app.show_stats = false;
+                }
+            });
+        });
+    }
+
+    /// A screen of its own. On a phone it fills the screen; elsewhere it is the
+    /// usual centred card. `scroll` lets a long page scroll; the phone scorecard
+    /// passes false, since it is laid out to fit and scrolls only its word list.
+    fn page(&mut self, ctx: &egui::Context, scroll: bool, contents: impl FnOnce(&mut Self, &mut egui::Ui)) {
+        if !is_narrow(ctx) {
+            return self.overlay(ctx, |app, ui| {
+                ui.vertical(|ui| contents(app, ui));
+            });
+        }
+        let screen = ctx.screen_rect();
+        const MARGIN: f32 = 12.0;
+        egui::Area::new(egui::Id::new("page"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                ui.painter().rect_filled(screen, 0.0, BG);
+                let inner = screen.shrink(MARGIN);
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner), |ui| {
+                    ui.set_width(inner.width());
+                    ui.set_max_height(inner.height());
+                    if scroll {
+                        egui::ScrollArea::vertical()
+                            .id_salt("page_scroll")
+                            .max_height(inner.height())
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| contents(self, ui));
+                    } else {
+                        contents(self, ui);
+                    }
+                });
+            });
     }
 
     /// A full-width, left-aligned section inside a centred card, for the phone
@@ -1533,9 +1852,17 @@ pub struct BoardGeometry {
     gap: f32,
 }
 
+/// Gap between tiles, as a fraction of the board's width.
+const DESKTOP_GAP: f32 = 0.035;
+const PHONE_GAP: f32 = 0.02;
+
 impl BoardGeometry {
     pub fn new(origin: Pos2, board_size: f32) -> Self {
-        let gap = board_size * 0.035;
+        Self::with_gap(origin, board_size, DESKTOP_GAP)
+    }
+
+    pub fn with_gap(origin: Pos2, board_size: f32, gap_fraction: f32) -> Self {
+        let gap = board_size * gap_fraction;
         let tile = (board_size - gap * (SIZE as f32 + 1.0)) / SIZE as f32;
         Self { origin, tile, gap }
     }
@@ -1669,6 +1996,135 @@ fn copy_icon(ui: &mut egui::Ui, rect: Rect, copied: bool) -> egui::Response {
         painter.rect_stroke(front, 2.0, stroke, egui::StrokeKind::Middle);
     }
     response
+}
+
+/// WORD over LEGEND in coloured letter tiles.
+fn logo(ui: &mut egui::Ui) {
+    const GAP: f32 = 5.0;
+    let size = ((ui.available_width() - GAP * 5.0) / 6.0).min(48.0);
+    let mut colour = 0;
+    for word in ["WORD", "LEGEND"] {
+        let width = word.len() as f32 * size + (word.len() - 1) as f32 * GAP;
+        let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), size), Sense::hover());
+        let painter = ui.painter();
+        let start = row.center().x - width / 2.0;
+        for (i, letter) in word.chars().enumerate() {
+            let tile = Rect::from_min_size(Pos2::new(start + i as f32 * (size + GAP), row.min.y), Vec2::splat(size));
+            let fill = LOGO_TILES[colour % LOGO_TILES.len()];
+            colour += 1;
+            painter.rect_filled(tile, size * 0.18, fill);
+            painter.rect_stroke(tile, size * 0.18, Stroke::new(2.0_f32, fill.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+            painter.text(tile.center(), Align2::CENTER_CENTER, letter, FontId::proportional(size * 0.62), Color32::WHITE);
+        }
+        ui.add_space(GAP);
+    }
+}
+
+/// PLAY spelled in big tiles across a band: the whole band is the button.
+fn play_band(ui: &mut egui::Ui) -> bool {
+    const GAP: f32 = 8.0;
+    let size = ((ui.available_width() - 40.0 - GAP * 3.0) / 4.0).min(66.0);
+    let (band, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), size + 28.0), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let painter = ui.painter();
+    let hot = response.hovered();
+    painter.rect_filled(band, 0.0, if hot { TILE } else { PANEL });
+    painter.line_segment([band.left_top(), band.right_top()], Stroke::new(2.0_f32, ACCENT));
+    painter.line_segment([band.left_bottom(), band.right_bottom()], Stroke::new(2.0_f32, ACCENT));
+
+    let width = size * 4.0 + GAP * 3.0;
+    let start = band.center().x - width / 2.0;
+    for (i, letter) in "PLAY".chars().enumerate() {
+        let tile = Rect::from_min_size(Pos2::new(start + i as f32 * (size + GAP), band.center().y - size / 2.0), Vec2::splat(size));
+        painter.rect_filled(tile, size * 0.16, if hot { ACCENT } else { ACCENT.gamma_multiply(0.85) });
+        painter.rect_stroke(tile, size * 0.16, Stroke::new(2.0_f32, Color32::WHITE), egui::StrokeKind::Inside);
+        painter.text(tile.center(), Align2::CENTER_CENTER, letter, FontId::proportional(size * 0.6), Color32::WHITE);
+    }
+    response.clicked()
+}
+
+/// A square button with a drawn icon over a short label.
+fn icon_button(ui: &mut egui::Ui, label: &str, icon: fn(&egui::Painter, Rect, Color32)) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(72.0, 60.0), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let painter = ui.painter();
+    let color = if response.hovered() { TEXT } else { MUTED };
+    painter.rect_filled(rect, 10.0, if response.hovered() { TILE_EDGE } else { TILE });
+    let icon_rect = Rect::from_center_size(Pos2::new(rect.center().x, rect.min.y + 22.0), Vec2::splat(22.0));
+    icon(painter, icon_rect, color);
+    painter.text(Pos2::new(rect.center().x, rect.max.y - 10.0), Align2::CENTER_CENTER, label, FontId::proportional(11.0), color);
+    response
+}
+
+fn draw_chart_icon(painter: &egui::Painter, r: Rect, color: Color32) {
+    let stroke = Stroke::new(2.0_f32, color);
+    painter.line_segment([r.left_bottom(), r.right_bottom()], stroke);
+    painter.line_segment([r.left_bottom(), r.left_top()], stroke);
+    let pts = vec![
+        r.left_bottom() + Vec2::new(4.0, -5.0),
+        r.left_bottom() + Vec2::new(9.0, -12.0),
+        r.left_bottom() + Vec2::new(14.0, -8.0),
+        r.left_bottom() + Vec2::new(20.0, -18.0),
+    ];
+    painter.add(egui::Shape::line(pts, stroke));
+}
+
+fn draw_copy_icon(painter: &egui::Painter, r: Rect, color: Color32) {
+    let stroke = Stroke::new(1.8_f32, color);
+    let back = Rect::from_min_size(r.min + Vec2::new(2.0, 2.0), Vec2::splat(13.0));
+    let front = back.translate(Vec2::splat(6.0));
+    painter.rect_stroke(back, 2.0, stroke, egui::StrokeKind::Middle);
+    painter.rect_filled(front, 2.0, TILE);
+    painter.rect_stroke(front, 2.0, stroke, egui::StrokeKind::Middle);
+}
+
+fn draw_tick_icon(painter: &egui::Painter, r: Rect, _color: Color32) {
+    let c = r.center();
+    let tick = vec![c + Vec2::new(-8.0, 0.0), c + Vec2::new(-2.5, 5.5), c + Vec2::new(8.0, -6.0)];
+    painter.add(egui::Shape::line(tick, Stroke::new(2.5_f32, GREEN)));
+}
+
+/// A legend entry: a short line in the series colour, then its name in muted ink.
+fn legend_key(ui: &mut egui::Ui, color: Color32, label: &str) {
+    let (key, _) = ui.allocate_exact_size(Vec2::new(16.0, 10.0), Sense::hover());
+    ui.painter().line_segment([key.left_center(), key.right_center()], Stroke::new(2.0_f32, color));
+    ui.painter().circle(key.center(), 3.0, color, Stroke::NONE);
+    ui.label(egui::RichText::new(label).size(11.0).color(MUTED));
+}
+
+/// A titled group of label/value rows, for the stats page.
+fn stat_block(ui: &mut egui::Ui, title: &str, rows: &[(&str, String)]) {
+    ui.label(egui::RichText::new(title).size(14.0).color(TEXT).strong());
+    for (label, value) in rows {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format!("{label}:")).size(12.0).color(MUTED));
+            ui.label(egui::RichText::new(value).size(12.0).color(TEXT).strong());
+        });
+    }
+}
+
+/// A chart scale topping out at or above `peak` in about four even, round steps.
+fn nice_scale(peak: u32) -> (u32, u32) {
+    let rough = (peak as f64 / 4.0).max(1.0);
+    let magnitude = 10f64.powf(rough.log10().floor());
+    let step = [1.0, 2.0, 2.5, 5.0, 10.0]
+        .iter()
+        .map(|m| m * magnitude)
+        .find(|s| *s >= rough)
+        .unwrap_or(10.0 * magnitude)
+        .max(1.0) as u32;
+    let top = peak.div_ceil(step) * step;
+    (top, step)
+}
+
+/// `0`, `900`, `5k`, `2.5k`: axis labels that stay short.
+fn short_number(n: u32) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        _ if n % 1000 == 0 => format!("{}k", n / 1000),
+        _ => format!("{:.1}k", n as f32 / 1000.0),
+    }
 }
 
 fn big_button(ui: &mut egui::Ui, label: &str, color: Color32) -> bool {
@@ -2122,77 +2578,73 @@ mod tests {
         )
     }
 
-    #[test]
-    fn the_last_ten_rounds_are_a_line_not_bars() {
-        let mut app = WordLegendApp::new();
-        for score in [1_000, 4_000, 2_500, 6_000, 3_000, 5_500, 7_000] {
-            app.game.ranking.record(score);
-        }
-        let color = league_color(app.game.ranking.league);
-        let ctx = egui::Context::default();
-        let shapes = form_panel_frame(&app, &ctx, vec![]);
-
-        // One 2px path through every round, in the league colour.
-        let lines: Vec<&egui::epaint::PathShape> = shapes
+    fn texts_of(shapes: &[egui::Shape]) -> Vec<String> {
+        shapes
             .iter()
             .filter_map(|s| match s {
-                egui::Shape::Path(p) if p.stroke.width == 2.0 => Some(p),
+                egui::Shape::Text(t) => Some(t.galley.job.text.clone()),
                 _ => None,
             })
-            .collect();
-        assert_eq!(lines.len(), 1, "expected one line, got {}", lines.len());
-        assert_eq!(lines[0].points.len(), 7);
+            .collect()
+    }
 
-        // Newest on the right, and a higher score sits higher on screen.
-        let points = &lines[0].points;
-        assert!(points.windows(2).all(|w| w[1].x > w[0].x), "rounds out of order");
-        assert!(points[6].y < points[0].y, "7,000 should plot above 1,000");
-
-        // A marker per round, and nothing drawn as a bar.
-        let markers = shapes
+    fn lines_in(shapes: &[egui::Shape], color: Color32) -> Vec<Vec<Pos2>> {
+        shapes
             .iter()
-            .filter(|s| matches!(s, egui::Shape::Circle(c) if c.fill == color))
-            .count();
-        assert_eq!(markers, 7);
-        let bars = shapes.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.fill == color.gamma_multiply(0.8)));
-        assert!(!bars, "the old bars are still drawn");
-
-        // The average is on the chart as a labelled hairline.
-        let labelled = shapes.iter().any(|s| matches!(s, egui::Shape::Text(t) if t.galley.job.text == "avg"));
-        assert!(labelled, "the average line has no label");
+            .filter_map(|s| match s {
+                egui::Shape::Path(p) if p.stroke.width == 2.0 && p.stroke.color == egui::epaint::ColorMode::Solid(color) => {
+                    Some(p.points.clone())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
-    fn hovering_the_line_reads_off_a_round() {
+    fn the_rank_chart_draws_game_scores_and_the_average_as_two_lines() {
         let mut app = WordLegendApp::new();
-        for score in [2_000, 9_000, 3_000] {
-            app.game.ranking.record(score);
+        for (score, words) in [(1_000, 5), (4_000, 12), (2_500, 9), (6_000, 20), (3_000, 10), (5_500, 18), (7_000, 22)] {
+            app.game.ranking.record_round(score, words, None);
         }
         let ctx = egui::Context::default();
         let shapes = form_panel_frame(&app, &ctx, vec![]);
-        let line = shapes
-            .iter()
-            .find_map(|s| match s {
-                egui::Shape::Path(p) if p.stroke.width == 2.0 => Some(p.points.clone()),
-                _ => None,
-            })
-            .expect("a line");
 
-        // Aim near, not on, the middle round: the nearest one should be picked.
-        let aim = line[1] + Vec2::new(6.0, 12.0);
-        form_panel_frame(&app, &ctx, vec![egui::Event::PointerMoved(aim)]);
-        let mut texts = Vec::new();
-        for _ in 0..3 {
-            texts = form_panel_frame(&app, &ctx, vec![egui::Event::PointerMoved(aim)])
-                .into_iter()
-                .filter_map(|s| match s {
-                    egui::Shape::Text(t) => Some(t.galley.job.text.clone()),
-                    _ => None,
-                })
-                .collect();
+        let scores = lines_in(&shapes, SERIES_SCORES);
+        let averages = lines_in(&shapes, SERIES_AVERAGE);
+        assert_eq!((scores.len(), averages.len()), (1, 1), "expected one line per series");
+        assert_eq!(scores[0].len(), 7);
+        assert_eq!(averages[0].len(), 7);
+
+        // Newest on the right; the scores swing, the average moves less.
+        assert!(scores[0].windows(2).all(|w| w[1].x > w[0].x), "games out of order");
+        assert!(scores[0][6].y < scores[0][0].y, "7,000 should plot above 1,000");
+        let spread = |line: &[Pos2]| line.iter().map(|p| p.y).fold(f32::MIN, f32::max) - line.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+        assert!(spread(&averages[0]) < spread(&scores[0]), "the average should swing less than the games");
+
+        // Two series, so a legend naming both.
+        let texts = texts_of(&shapes);
+        assert!(texts.iter().any(|t| t == "Game scores") && texts.iter().any(|t| t == "Average"), "no legend: {texts:?}");
+    }
+
+    #[test]
+    fn hovering_the_chart_reads_off_a_game() {
+        let mut app = WordLegendApp::new();
+        for (score, words) in [(2_000, 7), (9_000, 31), (3_000, 11)] {
+            app.game.ranking.record_round(score, words, None);
         }
-        assert!(texts.iter().any(|t| t == "1 round ago"), "no readout for the hovered round: {texts:?}");
-        assert!(texts.iter().any(|t| t == "9,000"), "hovered round's score missing: {texts:?}");
+        let ctx = egui::Context::default();
+        let shapes = form_panel_frame(&app, &ctx, vec![]);
+        let line = lines_in(&shapes, SERIES_SCORES).pop().expect("a line");
+
+        // Aim near, not on, the middle game: the nearest one should be picked.
+        let aim = line[1] + Vec2::new(6.0, 12.0);
+        let mut texts = Vec::new();
+        for _ in 0..4 {
+            texts = texts_of(&form_panel_frame(&app, &ctx, vec![egui::Event::PointerMoved(aim)]));
+        }
+        assert!(texts.iter().any(|t| t == "1 game ago"), "no readout for the hovered game: {texts:?}");
+        assert!(texts.iter().any(|t| t == "Score 9,000"), "hovered game's score missing: {texts:?}");
+        assert!(texts.iter().any(|t| t == "31 words"), "hovered game's words missing: {texts:?}");
     }
 
     #[test]
@@ -2200,8 +2652,139 @@ mod tests {
         let app = WordLegendApp::new();
         let ctx = egui::Context::default();
         let shapes = form_panel_frame(&app, &ctx, vec![]);
-        assert!(shapes.iter().any(|s| matches!(s, egui::Shape::Text(t) if t.galley.job.text == "Your rounds will chart here")));
-        assert!(!shapes.iter().any(|s| matches!(s, egui::Shape::Path(_))));
+        assert!(texts_of(&shapes).iter().any(|t| t == "Your rounds will chart here"));
+        assert!(lines_in(&shapes, SERIES_SCORES).is_empty());
+    }
+
+    #[test]
+    fn the_stats_page_shows_the_chart_best_game_averages_and_totals() {
+        for size in [Vec2::new(1000.0, 780.0), PHONES[0], PHONES[1]] {
+            let mut app = offline_app(true);
+            for (score, words, best) in [(3_000, 12, ("otters", 1_400)), (8_400, 30, ("quizzers", 2_200)), (5_000, 20, ("hat", 100))] {
+                app.game.ranking.record_round(score, words, Some(best));
+                app.game.ranking.best_score = app.game.ranking.best_score.max(score);
+            }
+            app.show_stats = true;
+            // Enough frames for the card's fade-in to finish, so colours are exact.
+            let (_, shapes) = run_frames(&mut app, size, 12);
+            assert_fits("stats page", &shapes, size);
+            let texts = texts_of(&shapes);
+            for expected in ["Best Game", "All-time Averages", "Totals", "quizzers (2200 points)", "8,400", "5,466", "16,400", "62"] {
+                assert!(texts.iter().any(|t| t == expected), "stats page at {size:?} is missing {expected:?}: {texts:?}");
+            }
+            assert_eq!(lines_in(&shapes, SERIES_SCORES).len(), 1, "no chart on the stats page at {size:?}");
+            for label in ["Newest", "Oldest"] {
+                assert!(texts.iter().any(|t| t == label), "no {label} axis label at {size:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_home_screen_welcomes_the_player_and_play_joins() {
+        for size in [Vec2::new(1000.0, 780.0), PHONES[0], PHONES[1]] {
+            let mut app = offline_app(true);
+            let ctx = egui::Context::default();
+            let screen = Rect::from_min_size(Pos2::ZERO, size);
+            let frame = |app: &mut WordLegendApp, events: Vec<egui::Event>| {
+                let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+                painted(ctx.run(input, |ctx| app.frame(ctx)).shapes)
+            };
+            let mut shapes = Vec::new();
+            for _ in 0..4 {
+                shapes = frame(&mut app, vec![]);
+            }
+            assert_fits("home screen", &shapes, size);
+            let texts = texts_of(&shapes);
+            for expected in ["Welcome,", "longest_name_16c", "Stats", "My code"] {
+                assert!(texts.iter().any(|t| t == expected), "home at {size:?} is missing {expected:?}");
+            }
+            // The logo and the PLAY band are tiles, letter by letter.
+            for letter in ["W", "O", "R", "D", "L", "E", "G", "N", "P", "A", "Y"] {
+                assert!(texts.iter().any(|t| t == letter), "no {letter} tile at {size:?}");
+            }
+
+            // Tap the Y of PLAY.
+            let y_tile = shapes
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) if t.galley.job.text == "Y" => Some(s.visual_bounding_rect().center()),
+                    _ => None,
+                })
+                .last()
+                .expect("a Y tile");
+            let press = |pressed| egui::Event::PointerButton {
+                pos: y_tile,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            frame(&mut app, vec![egui::Event::PointerMoved(y_tile)]);
+            frame(&mut app, vec![press(true)]);
+            frame(&mut app, vec![press(false)]);
+            assert!(app.live.joined(), "tapping PLAY at {size:?} did not join");
+        }
+    }
+
+    #[test]
+    fn the_phone_scorecard_fits_one_screen_without_scrolling_the_page() {
+        for size in PHONES.iter().take(2).copied() {
+            let mut app = offline_app(true);
+            for _ in 0..crate::league::MIN_GAMES_TO_MOVE {
+                app.game.ranking.record(9_000);
+            }
+            app.game.start_round();
+            app.game.round = Some(7);
+            app.game.score = 9_000;
+            app.game.time_left = 0.0;
+            app.game.tick(0.2);
+            let entries = (0..30)
+                .map(|i| net::Entry { name: format!("player_name_{i:02}"), score: 20_000 - i * 500, words: 30 })
+                .collect();
+            app.live.show_leaderboard(net::Leaderboard { round: 7, entries });
+
+            let (_, shapes) = run_frames(&mut app, size, 4);
+            assert_fits("phone scorecard", &shapes, size);
+            let texts = texts_of(&shapes);
+
+            // The countdown is pinned on screen, not below a fold.
+            let countdown = shapes
+                .iter()
+                .find(|s| matches!(s, egui::Shape::Text(t) if t.galley.job.text.starts_with("Next round in")))
+                .map(|s| s.visual_bounding_rect())
+                .expect("no countdown");
+            assert!(countdown.max.y <= size.y, "the countdown is off screen at {size:?}: {countdown:?}");
+
+            // Opens on the leaderboard, and offers the word lists as tabs.
+            assert!(texts.iter().any(|t| t == "Players (30)"), "no players tab: {texts:?}");
+            assert!(texts.iter().any(|t| t.starts_with("Common (")), "no Common tab");
+            assert!(texts.iter().any(|t| t == "player_name_00"), "the leaderboard is not the open tab");
+            assert!(texts.iter().any(|t| t == "9,000"), "the score is not beside the board");
+        }
+    }
+
+    #[test]
+    fn the_phone_board_is_nearly_edge_to_edge_and_diagonals_stay_easy() {
+        let size = PHONES[0];
+        let mut app = offline_app(true);
+        app.game.start_round();
+        let (_, shapes) = run_frames(&mut app, size, 4);
+        let tiles: Vec<Rect> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Rect(r) if r.fill == TILE => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        let span = tiles.iter().map(|r| r.max.x).fold(f32::MIN, f32::max) - tiles.iter().map(|r| r.min.x).fold(f32::MAX, f32::min);
+        assert!(span >= size.x * 0.9, "the board spans only {span}px of {}px", size.x);
+
+        // With the phone's tighter gaps, a diagonal still wanders a quarter tile
+        // off line without touching a neighbour.
+        let g = BoardGeometry::with_gap(Pos2::ZERO, size.x - 8.0, PHONE_GAP);
+        let (p, o) = (Position { row: 1, col: 1 }, Position { row: 2, col: 2 });
+        for offset in [-0.25 * g.tile, 0.25 * g.tile] {
+            assert_eq!(offset_drag(&g, p, o, offset), vec![p, o], "{offset}px off the diagonal picked up a neighbour");
+        }
     }
 
     #[test]
