@@ -293,13 +293,12 @@ impl WordLegendApp {
                 .color(AMBER)
                 .strong(),
         );
-        ui.label(
-            egui::RichText::new(
-                "It is the only way back into this account, on this device or any other.                  Nobody can recover it for you, because nothing else about you is stored.",
-            )
-            .size(12.0)
-            .color(MUTED),
-        );
+        for line in [
+            "It is the only way back into this account, on this device or any other.",
+            "Nobody can recover it for you, because nothing else about you is stored.",
+        ] {
+            ui.label(egui::RichText::new(line).size(12.0).color(MUTED));
+        }
 
         ui.add_space(18.0);
         ui.label(egui::RichText::new("DISPLAY NAME").size(11.0).color(MUTED).strong());
@@ -312,7 +311,7 @@ impl WordLegendApp {
         ui.add(
             egui::TextEdit::singleline(&mut self.signup.name)
                 .desired_width(280.0)
-                .hint_text("pick a name"),
+                .hint_text(hint("pick a name")),
         );
 
         let checked = identity::check_name(&self.signup.name);
@@ -320,16 +319,13 @@ impl WordLegendApp {
 
         ui.add_space(14.0);
         if self.signup.checking.is_some() {
-            ui.add_enabled(false, egui::Button::new(egui::RichText::new("CHECKING NAME…").size(17.0)));
+            disabled_big_button(ui, "CHECKING NAME…");
         } else if let Ok(name) = checked {
             if big_button(ui, "START PLAYING", ACCENT) {
                 self.check_name(Identity { id: pending.id.clone(), name });
             }
         } else {
-            ui.add_enabled(
-                false,
-                egui::Button::new(egui::RichText::new("START PLAYING").size(17.0)),
-            );
+            disabled_big_button(ui, "START PLAYING");
         }
 
         ui.add_space(10.0);
@@ -366,7 +362,7 @@ impl WordLegendApp {
                     egui::TextEdit::singleline(&mut self.signup.code)
                         .desired_width(320.0)
                         .font(egui::TextStyle::Monospace)
-                        .hint_text("XXXX-XXXX-XXXX-XXXX"),
+                        .hint_text(hint("XXXX-XXXX-XXXX-XXXX")),
                 );
                 if ui.add_sized([70.0, 24.0], egui::Button::new("Paste")).clicked() {
                     self.signup.paste.request();
@@ -394,7 +390,7 @@ impl WordLegendApp {
         ui.add(
             egui::TextEdit::singleline(&mut self.signup.name)
                 .desired_width(280.0)
-                .hint_text("pick a name"),
+                .hint_text(hint("pick a name")),
         );
         let checked = identity::check_name(&self.signup.name);
         self.name_problem(ui, &checked);
@@ -402,7 +398,7 @@ impl WordLegendApp {
         ui.add_space(14.0);
         match (parsed, checked) {
             _ if self.signup.checking.is_some() => {
-                ui.add_enabled(false, egui::Button::new(egui::RichText::new("CHECKING NAME…").size(17.0)));
+                disabled_big_button(ui, "CHECKING NAME…");
             }
             (Some(found), Ok(name)) => {
                 if big_button(ui, "RESTORE ACCOUNT", ACCENT) {
@@ -410,10 +406,7 @@ impl WordLegendApp {
                 }
             }
             _ => {
-                ui.add_enabled(
-                    false,
-                    egui::Button::new(egui::RichText::new("RESTORE ACCOUNT").size(17.0)),
-                );
+                disabled_big_button(ui, "RESTORE ACCOUNT");
             }
         }
 
@@ -1447,6 +1440,19 @@ fn big_button(ui: &mut egui::Ui, label: &str, color: Color32) -> bool {
     .clicked()
 }
 
+/// The same pill as `big_button`, faded, for an action that is not available
+/// yet. A default egui button here reads as plain grey text, not a button.
+fn disabled_big_button(ui: &mut egui::Ui, label: &str) {
+    ui.add_enabled_ui(false, |ui| big_button(ui, label, ACCENT));
+}
+
+/// Placeholder text for a field. It needs its colour set here: the app overrides
+/// every text colour to `TEXT`, and a plain hint would inherit that and look like
+/// something already typed in.
+fn hint(text: &str) -> egui::RichText {
+    egui::RichText::new(text).color(MUTED)
+}
+
 fn style(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = BG;
@@ -1612,6 +1618,71 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Every shape a frame painted, with nested lists flattened.
+    fn painted(shapes: Vec<egui::epaint::ClippedShape>) -> Vec<egui::Shape> {
+        fn flatten(shape: egui::Shape, out: &mut Vec<egui::Shape>) {
+            match shape {
+                egui::Shape::Vec(inner) => inner.into_iter().for_each(|s| flatten(s, out)),
+                other => out.push(other),
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in shapes {
+            flatten(clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// The things a screenshot of the signup card caught: a sentence with a hole
+    /// in it, a placeholder that looked typed in, and a disabled button that did
+    /// not look like a button.
+    #[test]
+    fn signup_text_and_buttons_look_right() {
+        for restoring in [false, true] {
+            let mut app = WordLegendApp::new();
+            app.signup.restoring = restoring;
+            let ctx = egui::Context::default();
+            let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 780.0));
+            let mut shapes = Vec::new();
+            for _ in 0..4 {
+                let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+                shapes = painted(ctx.run(input, |ctx| app.overlay_signup(ctx)).shapes);
+            }
+
+            let texts: Vec<(String, Vec<Color32>)> = shapes
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) => Some((
+                        t.galley.job.text.clone(),
+                        t.galley.job.sections.iter().map(|sec| sec.format.color).collect(),
+                    )),
+                    _ => None,
+                })
+                .collect();
+
+            for (text, _) in &texts {
+                assert!(!text.contains("   "), "a run of spaces in {text:?}");
+            }
+
+            let placeholders: &[&str] =
+                if restoring { &["pick a name", "XXXX-XXXX-XXXX-XXXX"] } else { &["pick a name"] };
+            for placeholder in placeholders {
+                let (_, colors) = texts
+                    .iter()
+                    .find(|(t, _)| t == placeholder)
+                    .unwrap_or_else(|| panic!("placeholder {placeholder:?} not drawn"));
+                assert!(colors.iter().all(|c| *c == MUTED), "{placeholder:?} drawn as {colors:?}, not muted");
+            }
+
+            // The disabled button keeps the pill's full size.
+            let pill = shapes.iter().any(|s| match s {
+                egui::Shape::Rect(r) => (r.rect.size() - Vec2::new(240.0, 48.0)).length() < 1.0,
+                _ => false,
+            });
+            assert!(pill, "the disabled button is not the usual pill (restoring: {restoring})");
+        }
     }
 
     #[test]
