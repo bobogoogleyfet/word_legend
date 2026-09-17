@@ -11,6 +11,8 @@ pub const SAVE: &str = "save";
 pub const LEGACY_BEST: &str = "legacy_best";
 /// The account: a random id and a display name.
 pub const IDENTITY: &str = "identity";
+/// The round being played, so a refreshed page can pick it back up.
+pub const ROUND: &str = "round";
 
 #[cfg(all(not(target_arch = "wasm32"), not(test)))]
 mod backend {
@@ -22,6 +24,7 @@ mod backend {
             // The name the game shipped under before it became Word Legend.
             super::LEGACY_BEST => ".wordherd_best",
             super::IDENTITY => ".word_legend_account",
+            super::ROUND => ".word_legend_round",
             _ => ".word_legend_save",
         };
         match std::env::var("HOME") {

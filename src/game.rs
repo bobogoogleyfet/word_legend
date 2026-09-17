@@ -4,6 +4,7 @@
 use crate::dictionary::{Dictionary, MIN_WORD_LEN};
 use crate::league::{RankChange, Ranking};
 use crate::net;
+use crate::storage;
 use crate::rotation::SoloRotation;
 use crate::themes::{Theme, Themes};
 use rand::rngs::StdRng;
@@ -57,9 +58,10 @@ const OBSCURE_TENTHS: u32 = 11;
 
 /// The letter bonus, for using the whole board. Each letter used in a found word
 /// (a yellow star) earns this much...
-pub const LETTER_USED_BONUS: u32 = 100;
-/// ...each letter used in two or more (a green star) this much again...
-pub const LETTER_REUSED_BONUS: u32 = 25;
+pub const LETTER_USED_BONUS: u32 = 25;
+/// ...each letter used in two or more (a green star) this much again: reusing a
+/// letter is the harder find...
+pub const LETTER_REUSED_BONUS: u32 = 100;
 /// ...and using every letter on the board this much more on top.
 pub const FULL_BOARD_BONUS: u32 = 500;
 /// A longest word at least this long makes an unthemed board a "Long" one.
@@ -143,6 +145,11 @@ pub struct Game {
     pub is_dragging: bool,
     /// What solo play serves next, when there is no server.
     solo: SoloRotation,
+    /// A round saved before the page was last closed, waiting to be picked back
+    /// up. A shared one needs the server's clock; see `live`.
+    pub pending_resume: Option<SavedRound>,
+    /// Seconds of play since the round was last saved.
+    since_saved: f32,
 
     // Presentation state the UI animates against.
     pub feedback: Feedback,
@@ -161,6 +168,7 @@ impl Game {
         let (grid, words, theme) = generate_board_local(&dictionary, &mut rng);
         let solo = SoloRotation::new(&mut rng);
         let ranking = Ranking::load();
+        let pending_resume = storage::read(storage::ROUND).and_then(|t| SavedRound::from_text(&t));
 
         Game {
             dictionary,
@@ -181,6 +189,8 @@ impl Game {
             rank_change: None,
             is_dragging: false,
             solo,
+            pending_resume,
+            since_saved: 0.0,
             feedback: Feedback::None,
             feedback_word: String::new(),
             feedback_points: 0,
@@ -233,6 +243,92 @@ impl Game {
         self.phase = Phase::Playing;
         self.is_dragging = false;
         self.clear_feedback();
+        self.save_round();
+    }
+
+    /// Pick up a solo round saved before the page closed. It resumes with the time
+    /// it had: a solo clock does not run while the page is closed. A shared round
+    /// waits for the server's clock instead.
+    pub fn resume_solo(&mut self) -> bool {
+        let Some(saved) = self.pending_resume.take_if(|s| s.round.is_none()) else { return false };
+        let Some(grid) = parse_grid(&saved.grid) else { return false };
+        let words = solve_board(&self.dictionary, &grid);
+        self.begin(grid, words, saved.theme.clone(), None, saved.time_left.clamp(1.0, ROUND_SECONDS));
+        self.restore_found(&saved.found);
+        true
+    }
+
+    /// Pick up a shared round saved before the page closed, on the server's board
+    /// for it, with whatever time the round has left. Refused if the saved board is
+    /// not that round's board.
+    pub fn resume_shared(&mut self, round: u64, board: &net::Board, time_left: f32) -> bool {
+        let Some(saved) = self.pending_resume.take_if(|s| s.round == Some(round)) else { return false };
+        if saved.grid.iter().map(|t| t.to_ascii_lowercase()).ne(board.grid.iter().map(|t| t.to_ascii_lowercase())) {
+            return false;
+        }
+        if !self.start_shared_round(round, board, time_left) {
+            return false;
+        }
+        self.restore_found(&saved.found);
+        true
+    }
+
+    /// A saved shared round whose time ran out while the page was closed: bank it
+    /// as it stood, so the words found are not lost. Returns the round, for the
+    /// caller to hand in while the server still takes it.
+    pub fn finish_pending(&mut self) -> Option<u64> {
+        let saved = self.pending_resume.take()?;
+        let grid = parse_grid(&saved.grid)?;
+        let words = solve_board(&self.dictionary, &grid);
+        self.begin(grid, words, saved.theme.clone(), saved.round, 0.0);
+        self.restore_found(&saved.found);
+        self.end_round();
+        self.phase = Phase::Ready;
+        saved.round
+    }
+
+    /// Put saved words back on the board: their points, their stars, the score.
+    /// A word whose path no longer spells it here is dropped.
+    fn restore_found(&mut self, found: &[(String, Vec<Position>)]) {
+        for (word, path) in found {
+            let spelled: String = path
+                .iter()
+                .filter(|p| p.row < SIZE && p.col < SIZE)
+                .map(|p| self.grid[p.row][p.col].letters)
+                .collect();
+            let steps = path.windows(2).all(|w| is_adjacent(w[0], w[1]));
+            if spelled != *word || !steps || self.found_set.contains(word) || !self.dictionary.contains(word) {
+                continue;
+            }
+            let points = self.word_score(word);
+            for at in path {
+                self.tile_uses[at.row][at.col] += 1;
+            }
+            self.found_set.insert(word.clone());
+            self.found.push(FoundWord { word: word.clone(), points, path: path.clone() });
+        }
+        self.score = self.found.iter().map(|w| w.points).sum::<u32>() + self.letter_bonus();
+        self.save_round();
+    }
+
+    /// Write the round in play to storage, so a refresh does not lose it.
+    fn save_round(&mut self) {
+        self.since_saved = 0.0;
+        if self.phase != Phase::Playing {
+            return;
+        }
+        let saved = SavedRound {
+            round: self.round,
+            grid: self.grid.iter().flatten().map(|c| c.letters.to_string()).collect(),
+            theme: self.theme.clone(),
+            time_left: self.time_left,
+            found: self.found.iter().map(|w| (w.word.clone(), w.path.clone())).collect(),
+        };
+        storage::write(storage::ROUND, &saved.to_text());
+    }
+
+    fn clear_saved_round(&mut self) {
+        storage::write(storage::ROUND, "");
     }
 
     pub fn tick(&mut self, dt: f32) {
@@ -256,6 +352,11 @@ impl Game {
         }
 
         self.time_left -= dt;
+        // A solo round's clock is its own, so keep it saved as it runs down.
+        self.since_saved += dt;
+        if self.since_saved >= 5.0 {
+            self.save_round();
+        }
         if self.time_left <= 0.0 {
             self.time_left = 0.0;
             self.end_round();
@@ -270,6 +371,8 @@ impl Game {
         self.results_left = RESULTS_SECONDS;
         self.path.clear();
         self.is_dragging = false;
+        // Finished and banked: nothing left to resume.
+        self.clear_saved_round();
         // A round with nothing found was not played -- a tab left open, a player
         // who wandered off -- and a zero would drag the rank average down for it.
         // It still goes on the leaderboard; it just is not banked.
@@ -374,6 +477,7 @@ impl Game {
         // Words, plus whatever the letter bonus has grown to with this one.
         self.score = self.found.iter().map(|w| w.points).sum::<u32>() + self.letter_bonus();
         self.set_feedback(Feedback::Accepted, word, points, cells);
+        self.save_round();
     }
 
     /// The bonus the letters used so far have earned.
@@ -571,6 +675,74 @@ pub fn word_points(len: usize) -> u32 {
         7 => 1_800,
         8 => 2_200,
         n => 2_200 + 400 * (n as u32 - 8),
+    }
+}
+
+/// A round in play, as saved to storage.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedRound {
+    /// The server's round, or `None` for a solo round.
+    pub round: Option<u64>,
+    /// Sixteen tiles, row by row.
+    pub grid: Vec<String>,
+    pub theme: Option<String>,
+    pub time_left: f32,
+    /// Each found word and the path it was traced along.
+    pub found: Vec<(String, Vec<Position>)>,
+}
+
+impl SavedRound {
+    pub fn to_text(&self) -> String {
+        let found: Vec<String> = self
+            .found
+            .iter()
+            .map(|(word, path)| {
+                let tiles: Vec<String> = path.iter().map(|p| (p.row * SIZE + p.col).to_string()).collect();
+                format!("{word}:{}", tiles.join("."))
+            })
+            .collect();
+        format!(
+            "round={}\ngrid={}\ntheme={}\ntime_left={}\nfound={}\n",
+            self.round.map(|r| r.to_string()).unwrap_or_else(|| "solo".to_string()),
+            self.grid.join(","),
+            self.theme.clone().unwrap_or_default(),
+            self.time_left,
+            found.join(";"),
+        )
+    }
+
+    /// Read a saved round; `None` for an empty or damaged save.
+    pub fn from_text(text: &str) -> Option<Self> {
+        let mut saved = SavedRound { round: None, grid: Vec::new(), theme: None, time_left: 0.0, found: Vec::new() };
+        let mut has_round = false;
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else { continue };
+            match key {
+                "round" => {
+                    has_round = true;
+                    saved.round = if value == "solo" { None } else { Some(value.parse().ok()?) };
+                }
+                "grid" => saved.grid = value.split(',').map(str::to_string).collect(),
+                "theme" => saved.theme = (!value.is_empty()).then(|| value.to_string()),
+                "time_left" => saved.time_left = value.parse().unwrap_or(0.0),
+                "found" => {
+                    saved.found = value
+                        .split(';')
+                        .filter(|w| !w.is_empty())
+                        .filter_map(|entry| {
+                            let (word, tiles) = entry.split_once(':')?;
+                            let path = tiles
+                                .split('.')
+                                .map(|t| t.parse::<usize>().ok().map(|i| Position { row: i / SIZE, col: i % SIZE }))
+                                .collect::<Option<Vec<_>>>()?;
+                            Some((word.to_string(), path))
+                        })
+                        .collect();
+                }
+                _ => {}
+            }
+        }
+        (has_round && saved.grid.len() == SIZE * SIZE).then_some(saved)
     }
 }
 
@@ -1042,13 +1214,13 @@ mod tests {
         let mut uses = [[0u32; SIZE]; SIZE];
         assert_eq!(letter_bonus(&uses), 0);
         uses[0][0] = 1;
-        assert_eq!(letter_bonus(&uses), 100, "a yellow star is 100");
+        assert_eq!(letter_bonus(&uses), 25, "a yellow star is 25");
         uses[0][0] = 2;
-        assert_eq!(letter_bonus(&uses), 125, "a green star adds 25");
+        assert_eq!(letter_bonus(&uses), 125, "a green star adds 100");
         uses[0][0] = 7;
         assert_eq!(letter_bonus(&uses), 125, "more uses earn nothing further");
         let all_once = [[1u32; SIZE]; SIZE];
-        assert_eq!(letter_bonus(&all_once), 16 * 100 + 500, "every letter used adds 500");
+        assert_eq!(letter_bonus(&all_once), 16 * 25 + 500, "every letter used adds 500");
         let all_twice = [[2u32; SIZE]; SIZE];
         assert_eq!(letter_bonus(&all_twice), 16 * 125 + 500);
 
@@ -1062,14 +1234,62 @@ mod tests {
             game.extend_path(Position { row: 0, col });
         }
         game.submit_path();
-        assert_eq!(game.score, word_points(4) + 4 * 100);
+        assert_eq!(game.score, word_points(4) + 4 * 25);
         assert_eq!(game.found_paths(), vec![vec![0u8, 1, 2, 3]]);
-        // Three of its letters again, in "her": three green stars, 3 * 25 more.
+        // Three of its letters again, in "her": three green stars, 3 * 100 more.
         for col in 0..3 {
             game.extend_path(Position { row: 0, col });
         }
         game.submit_path();
-        assert_eq!(game.score, word_points(4) + word_points(3) + 4 * 100 + 3 * 25);
+        assert_eq!(game.score, word_points(4) + word_points(3) + 4 * 25 + 3 * 100);
+    }
+
+    #[test]
+    fn a_saved_round_reads_back_and_resumes_with_its_words_and_stars() {
+        let mut game = Game::new();
+        game.start_round();
+        game.grid = board(["herd", "zzzz", "zzzz", "zzzz"]);
+        game.words = solve_board(&game.dictionary, &game.grid);
+        game.round = Some(42);
+        for col in 0..4 {
+            game.extend_path(Position { row: 0, col });
+        }
+        game.submit_path();
+        let saved = SavedRound {
+            round: game.round,
+            grid: game.grid.iter().flatten().map(|c| c.letters.to_string()).collect(),
+            theme: Some("Animals".into()),
+            time_left: 90.0,
+            found: game.found.iter().map(|w| (w.word.clone(), w.path.clone())).collect(),
+        };
+        let back = SavedRound::from_text(&saved.to_text()).expect("reads back");
+        assert_eq!(back, saved);
+        assert!(SavedRound::from_text("").is_none(), "an empty save is no round");
+
+        // The page comes back: the server says round 42 has 60 seconds left.
+        let score = game.score;
+        let mut fresh = Game::new();
+        fresh.pending_resume = Some(back.clone());
+        let board_msg = net::Board { grid: back.grid.clone(), theme: Some("Animals".into()) };
+        assert!(fresh.resume_shared(42, &board_msg, 60.0));
+        assert_eq!((fresh.phase, fresh.round, fresh.time_left), (Phase::Playing, Some(42), 60.0));
+        assert_eq!(fresh.found_words(), vec!["herd".to_string()]);
+        assert_eq!(fresh.score, score, "the resumed score differs");
+        assert_eq!(fresh.tile_uses[0][..4], [1, 1, 1, 1], "the stars were not restored");
+
+        // A different board for that round is not resumed onto.
+        let mut other = Game::new();
+        other.pending_resume = Some(back.clone());
+        let wrong = net::Board { grid: vec!["a".into(); 16], theme: None };
+        assert!(!other.resume_shared(42, &wrong, 60.0));
+
+        // The round ran out while the page was closed: banked as it stood.
+        let mut late = Game::new();
+        late.pending_resume = Some(back);
+        let games = late.ranking.lifetime.games;
+        assert_eq!(late.finish_pending(), Some(42));
+        assert_eq!(late.phase, Phase::Ready);
+        assert_eq!(late.ranking.lifetime.games, games + 1, "the saved round was not banked");
     }
 
     #[test]

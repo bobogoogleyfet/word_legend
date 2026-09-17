@@ -215,9 +215,9 @@ await test("the letter bonus follows the traced paths, and only valid ones", asy
     (await body(await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words, paths }) }))).score;
 
   assert.equal(await score(["cats"]), 400, "no paths, no bonus");
-  assert.equal(await score(["cats"], [[0, 1, 2, 3]]), 400 + 4 * 100, "four yellow stars");
+  assert.equal(await score(["cats"], [[0, 1, 2, 3]]), 400 + 4 * 25, "four yellow stars");
   // CAT reuses C, A and T: three green stars.
-  assert.equal(await score(["cats", "cat"], [[0, 1, 2, 3], [0, 1, 2]]), 400 + 100 + 4 * 100 + 3 * 25);
+  assert.equal(await score(["cats", "cat"], [[0, 1, 2, 3], [0, 1, 2]]), 400 + 100 + 4 * 25 + 3 * 100);
   // A path that does not spell its word, or jumps, earns nothing.
   assert.equal(await score(["cats"], [[4, 5, 6, 7]]), 400, "a path spelling EARS was counted for CATS");
   assert.equal(await score(["cats"], [[0, 1, 2, 15]]), 400, "a path that jumps across the board was counted");
@@ -233,7 +233,18 @@ await test("using every letter adds 500", async () => {
   const e2 = envWith({ grid, theme: null, words: [snaked], obscure: [] });
   await call(e2, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
   const res = await body(await call(e2, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: [snaked], paths: [path] }) }));
-  assert.equal(res.bonus, 16 * 100 + 500);
+  assert.equal(res.bonus, 16 * 25 + 500);
+});
+
+await test("the leaderboard shows each player's league", async () => {
+  const e = env();
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID2, name: "nobody" }) });
+  await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: realWords, league: 3 }) });
+  await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID2, round: roundInfo.round, words: [], league: 99 }) });
+  const table = await body(await call(e, `/leaderboard?round=${roundInfo.round}`));
+  assert.equal(table.entries.find((r) => r.name === "wordfan").league, 3);
+  assert.equal(table.entries.find((r) => r.name === "nobody").league, null, "an impossible league was stored");
 });
 
 await test("an older pack, with both tiers in words, still scores everything as common", async () => {

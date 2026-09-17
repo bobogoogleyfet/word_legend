@@ -202,7 +202,9 @@ impl WordLegendApp {
         egui::TopBottomPanel::top("hud")
             .resizable(false)
             .frame(egui::Frame::default().fill(PANEL).inner_margin(hud_margin))
-            .show(ctx, |ui| if narrow { self.hud_narrow(ui) } else { self.hud(ui) });
+            // The one-line bar needs room for LEAVE as well; below 900px the two-row
+            // phone bar fits better.
+            .show(ctx, |ui| if ctx.screen_rect().width() < 900.0 { self.hud_narrow(ui) } else { self.hud(ui) });
 
         // On a narrow window (a phone in the web build) the side panel would squeeze
         // the board into nothing, so drop it and let the board have the room.
@@ -443,9 +445,9 @@ impl WordLegendApp {
         }
 
         // The field and its button side by side, centred as one row.
-        let field_width = (ui.available_width() - 8.0 - 70.0).min(320.0);
+        let field_width = (ui.available_width() - 8.0 - 100.0).min(320.0);
         ui.allocate_ui_with_layout(
-            Vec2::new(field_width + 8.0 + 70.0, 30.0),
+            Vec2::new(field_width + 8.0 + 100.0, 44.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.add(
@@ -454,7 +456,7 @@ impl WordLegendApp {
                         .font(egui::TextStyle::Monospace)
                         .hint_text(hint("XXXX-XXXX-XXXX-XXXX")),
                 );
-                if ui.add_sized([70.0, 24.0], egui::Button::new("Paste")).clicked() {
+                if action_button(ui, "Paste", ACCENT).clicked() {
                     self.signup.paste.request();
                 }
             },
@@ -556,31 +558,33 @@ impl WordLegendApp {
 
             ui.add_space(24.0);
 
-            let rank = &self.game.ranking;
+            let league = self.game.ranking.league;
             ui.vertical(|ui| {
-                ui.label(
-                    egui::RichText::new(LEAGUES[rank.league].name.to_uppercase())
-                        .size(15.0)
-                        .color(league_color(rank.league))
-                        .strong(),
-                );
-                ui.label(
-                    egui::RichText::new(format!("Rank {} avg", thousands(rank.average() as usize)))
-                        .size(11.0)
-                        .color(MUTED),
-                );
+                ui.add_space(6.0);
+                rank_label(ui, league, 16.0);
+                let (label, color) = self.link_label();
+                ui.label(egui::RichText::new(label).size(11.0).color(color).strong());
             });
 
             ui.add_space(24.0);
 
             ui.vertical(|ui| {
                 let name = self.identity.as_ref().map(|i| i.name.as_str()).unwrap_or("");
+                ui.add_space(6.0);
                 ui.label(egui::RichText::new(name).size(15.0).color(TEXT).strong());
-                let (label, color) = self.link_label();
-                ui.label(egui::RichText::new(label).size(11.0).color(color).strong());
             });
 
             ui.add_space(24.0);
+
+            if self.game.phase == Phase::Playing {
+                ui.vertical(|ui| {
+                    ui.add_space(4.0);
+                    if action_button(ui, "LEAVE", RED).clicked() {
+                        self.confirm_leave = true;
+                    }
+                });
+                ui.add_space(16.0);
+            }
 
             ui.vertical(|ui| {
                 ui.add_space(4.0);
@@ -596,7 +600,9 @@ impl WordLegendApp {
         // Three equal columns. Laid out right-to-left instead, the name took the
         // width and left the league a sliver to wrap into, one letter a line.
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-        let rank = &self.game.ranking;
+        let league = self.game.ranking.league;
+        let playing = self.game.phase == Phase::Playing;
+        let mut leave = false;
         ui.columns(3, |cols| {
             cols[0].label(
                 egui::RichText::new(thousands(self.game.score as usize)).size(26.0).color(TEXT).strong(),
@@ -604,21 +610,24 @@ impl WordLegendApp {
             // The found-words panel does not fit on a phone; the count does.
             cols[0].label(egui::RichText::new(format!("{} found", self.game.found.len())).size(11.0).color(MUTED));
 
-            cols[1].label(
-                egui::RichText::new(LEAGUES[rank.league].name.to_uppercase())
-                    .size(13.0)
-                    .color(league_color(rank.league))
-                    .strong(),
-            );
-            cols[1].label(
-                egui::RichText::new(format!("{} avg", thousands(rank.average() as usize))).size(11.0).color(MUTED),
-            );
-
-            let name = self.identity.as_ref().map(|i| i.name.as_str()).unwrap_or("");
-            cols[2].label(egui::RichText::new(name).size(13.0).color(TEXT).strong());
+            cols[1].add_space(4.0);
+            rank_label(&mut cols[1], league, 14.0);
             let (label, color) = self.link_label();
-            cols[2].label(egui::RichText::new(label).size(11.0).color(color).strong());
+            cols[1].label(egui::RichText::new(label).size(11.0).color(color).strong());
+
+            // Leaving is right there in the bar, not below the fold.
+            if playing {
+                cols[2].with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    leave = action_button(ui, "LEAVE", RED).clicked();
+                });
+            } else {
+                let name = self.identity.as_ref().map(|i| i.name.as_str()).unwrap_or("");
+                cols[2].label(egui::RichText::new(name).size(13.0).color(TEXT).strong());
+            }
         });
+        if leave {
+            self.confirm_leave = true;
+        }
         ui.add_space(4.0);
         self.timer_bar(ui);
     }
@@ -739,7 +748,7 @@ impl WordLegendApp {
 
             if self.game.phase == Phase::Playing {
                 ui.add_space(4.0);
-                if ui.button(egui::RichText::new("Leave round").size(13.0)).clicked() {
+                if action_button(ui, "Leave round", RED).clicked() {
                     self.confirm_leave = true;
                 }
             }
@@ -1062,10 +1071,11 @@ impl WordLegendApp {
                 }
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new(note).size(13.0).color(color));
-                if app.live.queued(&app.game, app.now)
-                    && ui.link(egui::RichText::new("Leave the queue").size(12.0).color(ACCENT)).clicked()
-                {
-                    app.live.leave_queue();
+                if app.live.queued(&app.game, app.now) {
+                    ui.add_space(6.0);
+                    if action_button(ui, "Leave the queue", TILE_EDGE).clicked() {
+                        app.live.leave_queue();
+                    }
                 }
 
                 ui.add_space(26.0);
@@ -1218,7 +1228,7 @@ impl WordLegendApp {
     /// The board and its numbers side by side at the top, the tabs under them, the
     /// list filling what is left, and the countdown pinned to the bottom.
     fn results_page(&mut self, ui: &mut egui::Ui) {
-        const FOOTER: f32 = 40.0;
+        const FOOTER: f32 = 56.0;
         let width = ui.available_width();
 
         ui.horizontal(|ui| {
@@ -1255,11 +1265,10 @@ impl WordLegendApp {
 
         let tabs = self.tab_list();
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.x = 6.0;
             for (tab, label) in &tabs {
                 let selected = self.current_tab() == *tab;
-                let text = egui::RichText::new(label).size(12.0).color(if selected { TEXT } else { MUTED }).strong();
-                if ui.selectable_label(selected, text).clicked() {
+                if tab_button(ui, label, selected) {
                     self.results_tab = *tab;
                 }
             }
@@ -1311,11 +1320,11 @@ impl WordLegendApp {
                 .color(if left <= 10.0 { AMBER } else { MUTED })
                 .strong();
             let width = ui.fonts(|f| f.layout_no_wrap(format!("Next round in {}s", left.ceil() as u32), FontId::proportional(15.0), TEXT).size().x);
-            let button_width = 110.0;
+            let button_width = 130.0;
             ui.add_space(((ui.available_width() - width - button_width - 16.0) / 2.0).max(0.0));
             ui.label(label);
             ui.add_space(16.0);
-            if ui.button(egui::RichText::new("Back to home").size(13.0)).clicked() {
+            if action_button(ui, "Back to home", ACCENT).clicked() {
                 self.live.close_results(&mut self.game);
             }
         });
@@ -1380,7 +1389,7 @@ impl WordLegendApp {
     /// Every word through the tapped letter, found ones in green, in columns that
     /// scroll together. Tap a word to draw its path on the board.
     fn letter_words(&mut self, ui: &mut egui::Ui, height: f32) {
-        const HEADER: f32 = 26.0;
+        const HEADER: f32 = 54.0;
         let Some(focus) = self.letter_focus.as_ref() else { return };
         let letter = capitalize(self.game.grid[focus.at.row][focus.at.col].letters);
         let found = focus.words.iter().filter(|(w, _)| self.game.has_found(w)).count();
@@ -1394,7 +1403,7 @@ impl WordLegendApp {
                     .strong(),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                close = ui.button(egui::RichText::new("Back to lists").size(11.0)).clicked();
+                close = action_button(ui, "Back to lists", TILE_EDGE).clicked();
             });
         });
         ui.separator();
@@ -1559,6 +1568,9 @@ impl WordLegendApp {
                     egui::Label::new(egui::RichText::new(format!("{}.", i + 1)).size(12.0).color(MUTED)),
                 );
                 ui.label(egui::RichText::new(&entry.name).size(13.0).color(color).strong());
+                if let Some(league) = entry.league.filter(|l| *l < LEAGUES.len()) {
+                    ui.label(egui::RichText::new(LEAGUES[league].name).size(11.0).color(league_color(league)).strong());
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // A row still waiting on its final score shows as it stood.
                     let detail = if entry.finished { format!("{} words", entry.words) } else { "finishing…".to_string() };
@@ -1867,7 +1879,7 @@ impl WordLegendApp {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("STATS").size(22.0).color(TEXT).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(egui::RichText::new("Back").size(14.0)).clicked() {
+                    if action_button(ui, "Back", ACCENT).clicked() {
                         app.show_stats = false;
                     }
                 });
@@ -2430,6 +2442,18 @@ fn league_ladder(ui: &mut egui::Ui, league: usize, average: u32) {
     });
 }
 
+/// "Rank: Gold", the league in its own colour.
+fn rank_label(ui: &mut egui::Ui, league: usize, size: f32) {
+    let mut job = egui::text::LayoutJob::default();
+    job.append("Rank: ", 0.0, egui::TextFormat { font_id: FontId::proportional(size), color: MUTED, ..Default::default() });
+    job.append(
+        LEAGUES[league].name,
+        0.0,
+        egui::TextFormat { font_id: FontId::proportional(size), color: league_color(league), ..Default::default() },
+    );
+    ui.label(job);
+}
+
 /// What earns the letter bonus, with the stars that mark it.
 fn bonus_key() -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
@@ -2438,9 +2462,9 @@ fn bonus_key() -> egui::text::LayoutJob {
         job.append(text, 0.0, egui::TextFormat { font_id: font.clone(), color, ..Default::default() });
     };
     add("\u{2605}", GOLD);
-    add(" +100 each letter used   ", MUTED);
+    add(" +25 each letter used   ", MUTED);
     add("\u{2605}", GREEN);
-    add(" +25 used again   all letters +500", MUTED);
+    add(" +100 used again   all letters +500", MUTED);
     job.halign = egui::Align::Center;
     job
 }
@@ -2477,6 +2501,35 @@ fn short_number(n: u32) -> String {
         _ if n % 1000 == 0 => format!("{}k", n / 1000),
         _ => format!("{:.1}k", n as f32 / 1000.0),
     }
+}
+
+/// A button that looks like one and is easy to hit: filled, bold, and at least a
+/// fingertip tall on a phone (44px, the usual touch-target minimum), a little
+/// smaller on a desktop where a mouse is precise.
+fn action_button(ui: &mut egui::Ui, label: &str, fill: Color32) -> egui::Response {
+    let narrow = is_narrow(ui.ctx());
+    let (height, size) = if narrow { (44.0, 15.0) } else { (36.0, 14.0) };
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).size(size).color(Color32::WHITE).strong())
+            .fill(fill)
+            .stroke(Stroke::new(1.0_f32, fill.gamma_multiply(1.3)))
+            .corner_radius(height / 2.0)
+            .min_size(Vec2::new(96.0, height)),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A tab in a row of tabs: filled when selected, touch-sized on a phone.
+fn tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> bool {
+    let height = if is_narrow(ui.ctx()) { 40.0 } else { 30.0 };
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).size(13.0).color(if selected { Color32::WHITE } else { TEXT }).strong())
+            .fill(if selected { ACCENT } else { TILE })
+            .corner_radius(8.0)
+            .min_size(Vec2::new(0.0, height)),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
+    .clicked()
 }
 
 fn big_button(ui: &mut egui::Ui, label: &str, color: Color32) -> bool {
@@ -2694,7 +2747,8 @@ mod tests {
                 .collect();
             assert!(texts.iter().any(|t| t == "BEST"), "the clock row lost its BEST column at {size:?}");
             let hud = egui::containers::panel::PanelState::load(&ctx, egui::Id::new("hud")).expect("hud").rect;
-            assert!(hud.height() <= 110.0, "the heads-up display is {}px tall at {size:?}", hud.height());
+            // Room for a touch-sized LEAVE button; the letter-wrapping bug made it 186px.
+            assert!(hud.height() <= 130.0, "the heads-up display is {}px tall at {size:?}", hud.height());
 
             for shared in [false, true] {
                 let mut app = offline_app(true);
@@ -2708,7 +2762,7 @@ mod tests {
                 if shared {
                     app.game.round = Some(7);
                     let entries = (0..12)
-                        .map(|i| net::Entry { name: format!("player_name_{i:02}"), score: 20_000 - i * 900, words: 30, finished: true })
+                        .map(|i| net::Entry { name: format!("player_name_{i:02}"), score: 20_000 - i * 900, words: 30, finished: true, league: Some(i as usize % 6) })
                         .collect();
                     app.live.show_leaderboard(net::Leaderboard { round: 7, entries });
                 }
@@ -2738,8 +2792,8 @@ mod tests {
         app.live.show_leaderboard(net::Leaderboard {
             round: 7,
             entries: vec![
-                net::Entry { name: "someone".into(), score: 5_000, words: 12, finished: true },
-                net::Entry { name: "longest_name_16c".into(), score: 0, words: 0, finished: true },
+                net::Entry { name: "someone".into(), score: 5_000, words: 12, finished: true, league: Some(1) },
+                net::Entry { name: "longest_name_16c".into(), score: 0, words: 0, finished: true, league: None },
             ],
         });
         let (_, shapes) = run_frames(&mut app, Vec2::new(1000.0, 780.0), 4);
@@ -2833,7 +2887,7 @@ mod tests {
         let mut app = app_after_round();
         app.game.round = Some(7);
         let entries = (0..40)
-            .map(|i| net::Entry { name: format!("player_{i:02}"), score: 20_000 - i * 400, words: 30, finished: true })
+            .map(|i| net::Entry { name: format!("player_{i:02}"), score: 20_000 - i * 400, words: 30, finished: true, league: Some(i as usize % 6) })
             .collect();
         app.live.show_leaderboard(net::Leaderboard { round: 7, entries });
 
@@ -3057,7 +3111,7 @@ mod tests {
                 assert!(texts.iter().any(|t| t == label), "no {label} axis label at {size:?}");
             }
             // The leagues and the average each takes, with where the player is.
-            for expected in ["Leagues", "Bronze", "Silver", "2,500 avg", "Hero", "18,000 avg", "You are here", "Average reached"] {
+            for expected in ["Leagues", "Bronze", "Silver", "4,000 avg", "Hero", "30,000 avg", "You are here", "Average reached"] {
                 assert!(texts.iter().any(|t| t == expected), "the league ladder at {size:?} is missing {expected:?}");
             }
         }
@@ -3160,7 +3214,7 @@ mod tests {
             app.game.time_left = 0.0;
             app.game.tick(0.2);
             let entries = (0..30)
-                .map(|i| net::Entry { name: format!("player_name_{i:02}"), score: 20_000 - i * 500, words: 30, finished: i % 2 == 0 })
+                .map(|i| net::Entry { name: format!("player_name_{i:02}"), score: 20_000 - i * 500, words: 30, finished: i % 2 == 0, league: Some(3) })
                 .collect();
             app.live.show_leaderboard(net::Leaderboard { round: 7, entries });
 
@@ -3425,8 +3479,14 @@ mod tests {
             assert!(texts.iter().any(|t| t.starts_with("Letter bonus +")), "no letter bonus under the board at {size:?}");
             assert_fits("playing", &shapes, size);
 
+            // The bar says the rank plainly, and has LEAVE in it.
+            assert!(texts.iter().any(|t| t == "Rank: Bronze"), "the bar does not say Rank: Bronze at {size:?}");
+            assert!(!texts.iter().any(|t| t.ends_with(" avg") && t.starts_with("Rank")), "the bar still shows the average");
+            let bar_leave = text_centre(&shapes, "LEAVE").expect("a LEAVE button in the bar");
+            assert!(bar_leave.y < 130.0, "LEAVE is not in the bar at the top at {size:?}: {bar_leave:?}");
+
             // Leave round: a confirmation first, nothing banked yet.
-            click(&mut app, &ctx, screen, text_centre(&shapes, "Leave round").expect("a Leave round button"));
+            click(&mut app, &ctx, screen, bar_leave);
             let shapes = run_frames_on(&mut app, &ctx, size, 4);
             let texts = texts_of(&shapes);
             assert!(texts.iter().any(|t| t == "Leave this round?"), "no confirmation at {size:?}");
@@ -3444,6 +3504,68 @@ mod tests {
             click(&mut app, &ctx, screen, text_centre(&shapes, "LEAVE ROUND").unwrap());
             assert_eq!(app.game.phase, Phase::Ready, "leaving did not go home at {size:?}");
             assert_eq!(app.game.ranking.lifetime.games, games + 1, "leaving did not bank the score");
+        }
+    }
+
+    /// Buttons are filled and, on a phone, at least a fingertip tall.
+    #[test]
+    fn buttons_are_touch_sized_on_a_phone() {
+        let size = PHONES[1];
+        let mut app = offline_app(true);
+        app.game.start_round();
+        app.game.score = 1_000;
+        app.game.time_left = 0.0;
+        app.game.tick(0.2);
+        app.game.round = Some(7);
+        let (_, shapes) = run_frames(&mut app, size, 8);
+        let label = text_centre(&shapes, "Back to home").expect("a Back to home button");
+        let button = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Rect(r) if r.fill == ACCENT && r.rect.contains(label) => Some(r.rect),
+                _ => None,
+            })
+            .next()
+            .expect("Back to home is not a filled button");
+        assert!(button.height() >= 44.0, "Back to home is only {}px tall on a phone", button.height());
+        for tab in ["Players (0)", "Words"] {
+            let at = text_centre(&shapes, tab).unwrap_or_else(|| panic!("no {tab} tab"));
+            let rect = shapes
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Rect(r) if (r.fill == ACCENT || r.fill == TILE) && r.rect.contains(at) && r.rect.width() < 250.0 => Some(r.rect),
+                    _ => None,
+                })
+                .next()
+                .unwrap_or_else(|| panic!("the {tab} tab is not a filled button"));
+            assert!(rect.height() >= 40.0, "the {tab} tab is only {}px tall", rect.height());
+        }
+    }
+
+    #[test]
+    fn the_leaderboard_shows_each_players_league() {
+        let mut app = offline_app(true);
+        app.game.start_round();
+        app.game.score = 1_000;
+        app.game.time_left = 0.0;
+        app.game.tick(0.2);
+        app.game.round = Some(7);
+        app.live.show_leaderboard(net::Leaderboard {
+            round: 7,
+            entries: vec![
+                net::Entry { name: "ace".into(), score: 30_000, words: 60, finished: true, league: Some(5) },
+                net::Entry { name: "newbie".into(), score: 900, words: 4, finished: true, league: Some(0) },
+                net::Entry { name: "oldclient".into(), score: 800, words: 3, finished: true, league: None },
+            ],
+        });
+        for size in [PHONES[0], Vec2::new(1000.0, 780.0)] {
+            let (_, shapes) = run_frames(&mut app, size, 8);
+            let texts = texts_of(&shapes);
+            for (name, league) in [("ace", "Hero"), ("newbie", "Bronze")] {
+                let row_y = text_centre(&shapes, name).unwrap_or_else(|| panic!("{name} missing at {size:?}")).y;
+                let tag = shapes.iter().any(|s| matches!(s, egui::Shape::Text(t) if t.galley.job.text == league && (s.visual_bounding_rect().center().y - row_y).abs() < 6.0));
+                assert!(tag, "{name}'s league {league} is not on their row at {size:?}: {texts:?}");
+            }
         }
     }
 

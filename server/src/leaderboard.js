@@ -21,13 +21,13 @@ export class Leaderboard extends DurableObject {
    * the score handed in at the end. Progress never overwrites a final score: a
    * slow progress report can land after the final one.
    */
-  async submit(id, name, score, words, final = true) {
+  async submit(id, name, score, words, final = true, league = null) {
     const key = `score:${id}`;
     if (!final) {
       const existing = await this.ctx.storage.get(key);
       if (existing?.final) return;
     }
-    await this.ctx.storage.put(key, { name, score, words, final });
+    await this.ctx.storage.put(key, { name, score, words, final, league });
     await this.ctx.storage.setAlarm(Date.now() + KEEP_MS);
   }
 
@@ -41,7 +41,7 @@ export class Leaderboard extends DurableObject {
       .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
       .slice(0, limit)
       // Rows from before `final` existed were all final scores.
-      .map(({ name, score, words, final }) => ({ name, score, words, final: final ?? true }));
+      .map(({ name, score, words, final, league }) => ({ name, score, words, final: final ?? true, league: league ?? null }));
   }
 
   /** The round is long over: let the object go. */

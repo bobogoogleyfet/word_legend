@@ -42,12 +42,12 @@ function scoreWord(word, obscure) {
 }
 
 /**
- * The letter bonus, matching the client's `letter_bonus`: 100 for each tile used
- * in a found word, 25 more for each used in two or more, and 500 for using every
+ * The letter bonus, matching the client's `letter_bonus`: 25 for each tile used
+ * in a found word, 100 more for each used in two or more, and 500 for using every
  * tile. It follows the paths the player traced, each checked against the board.
  */
-const LETTER_USED_BONUS = 100;
-const LETTER_REUSED_BONUS = 25;
+const LETTER_USED_BONUS = 25;
+const LETTER_REUSED_BONUS = 100;
 const FULL_BOARD_BONUS = 500;
 
 /** A path is the tiles, as indices 0-15, a word was traced through. */
@@ -250,6 +250,11 @@ async function scoreSubmission(request, env, body, phase) {
   return { id, round, player, score, bonus, accepted, rejected };
 }
 
+/** The league a player's game reported, if it is one of the six. */
+function leagueOf(body) {
+  return Number.isInteger(body.league) && body.league >= 0 && body.league <= 5 ? body.league : null;
+}
+
 /**
  * Report progress while a round is being played: the player is on the round's
  * leaderboard from the moment they join, and their score keeps pace, so when
@@ -259,7 +264,7 @@ async function postProgress(request, env, body) {
   const result = await scoreSubmission(request, env, body, "play");
   if (result.error) return result.error;
   const { id, round, player, score, accepted } = result;
-  await leaderboard(env, round).submit(id, player.name, score, accepted.length, false);
+  await leaderboard(env, round).submit(id, player.name, score, accepted.length, false, leagueOf(body));
   return json(request, env, { score, accepted: accepted.length });
 }
 
@@ -269,7 +274,7 @@ async function postScore(request, env, body) {
   if (result.error) return result.error;
   const { id, round, player, score, bonus, accepted, rejected } = result;
 
-  await leaderboard(env, round).submit(id, player.name, score, accepted.length, true);
+  await leaderboard(env, round).submit(id, player.name, score, accepted.length, true, leagueOf(body));
 
   // Rank is the average of the last ten rounds, same as the client shows. A round
   // with nothing found was not played -- it is on the leaderboard as a zero, but

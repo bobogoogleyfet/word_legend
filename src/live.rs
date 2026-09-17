@@ -120,6 +120,7 @@ impl Live {
         self.poll_if_due(game, now);
         if let Some(me) = identity {
             self.keep_name(me, now);
+            self.resume(game, me, now);
         }
         self.drive(game, now);
         if let Some(me) = identity {
@@ -149,7 +150,7 @@ impl Live {
         }
         if let (Some(round), Some(me)) = (game.round, me) {
             if self.name == NameStatus::Claimed && self.submitted != Some(round) {
-                self.client.submit(&me.id, round, &game.found_words(), &game.found_paths());
+                self.client.submit(&me.id, round, &game.found_words(), &game.found_paths(), game.ranking.league);
                 self.submitted = Some(round);
                 self.submitted_at = now;
             }
@@ -305,6 +306,49 @@ impl Live {
         }
     }
 
+    /// Pick a shared round back up after the page was refreshed. Still running:
+    /// back on its board, with its words, for the time it has left, and in the
+    /// cycle of rounds again. Over already: banked as it stood, and handed in if
+    /// the server still takes it.
+    fn resume(&mut self, game: &mut Game, me: &Identity, now: f64) {
+        let Some(saved) = game.pending_resume.as_ref() else { return };
+        // A solo round needs no server: it carries on with the time it had.
+        let Some(round) = saved.round else {
+            if game.phase == Phase::Ready {
+                game.resume_solo();
+            } else {
+                game.pending_resume = None;
+            }
+            return;
+        };
+        if game.phase != Phase::Ready {
+            game.pending_resume = None; // something else is already on
+            return;
+        }
+        let Some(clock) = self.clock else {
+            if self.server_away(now) {
+                game.finish_pending();
+            }
+            return;
+        };
+        if clock.round == round && clock.playing {
+            let board = self.board.as_ref().filter(|(r, _)| *r == round).map(|(_, b)| b.clone());
+            let Some(board) = board else { return }; // its board is on its way
+            if game.resume_shared(round, &board, clock.left) {
+                self.joined = true;
+            } else {
+                game.pending_resume = None;
+            }
+        } else if clock.round >= round {
+            game.finish_pending();
+            if clock.round == round && self.name == NameStatus::Claimed && self.submitted != Some(round) {
+                self.client.submit(&me.id, round, &game.found_words(), &game.found_paths(), game.ranking.league);
+                self.submitted = Some(round);
+                self.submitted_at = now;
+            }
+        }
+    }
+
     // --- the round cycle -----------------------------------------------------
 
     fn drive(&mut self, game: &mut Game, now: f64) {
@@ -383,7 +427,7 @@ impl Live {
                 _ => true,
             };
             if due {
-                self.client.progress(&me.id, round, &game.found_words(), &game.found_paths());
+                self.client.progress(&me.id, round, &game.found_words(), &game.found_paths(), game.ranking.league);
                 self.progress = Some((round, now, found));
             }
         }
@@ -396,7 +440,7 @@ impl Live {
         }
 
         if self.submitted != Some(round) && self.name == NameStatus::Claimed {
-            self.client.submit(&me.id, round, &game.found_words(), &game.found_paths());
+            self.client.submit(&me.id, round, &game.found_words(), &game.found_paths(), game.ranking.league);
             self.submitted = Some(round);
             self.submitted_at = now;
             self.next_leaderboard = now + LEADERBOARD_FIRST;
@@ -683,6 +727,68 @@ mod tests {
         assert!(live.queued(&game, 0.0), "waiting for the next round should read as queued");
         live.leave_queue();
         assert!(!live.queued(&game, 0.0));
+    }
+
+    #[test]
+    fn a_refreshed_page_picks_the_shared_round_back_up() {
+        let mut game = Game::new();
+        let mut live = online();
+        serve(&live, 40, "play", 90.0, 0.0);
+        let grid: Vec<String> = GRID.iter().map(|s| s.to_string()).collect();
+        let c = crate::game::Position { row: 0, col: 0 };
+        let path: Vec<_> = (0..4).map(|col| crate::game::Position { row: 0, col }).collect();
+        game.pending_resume = Some(crate::game::SavedRound {
+            round: Some(40),
+            grid: grid.clone(),
+            theme: Some("Colors".into()),
+            time_left: 120.0,
+            found: vec![("came".into(), path)],
+        });
+        let _ = c;
+        live.update(&mut game, Some(&me()), 5.0);
+        assert_eq!(game.phase, Phase::Playing, "the saved round was not resumed");
+        assert_eq!(game.round, Some(40));
+        assert_eq!(game.time_left, 85.0, "resumed with the wrong time");
+        assert_eq!(game.found_words(), vec!["came".to_string()]);
+        assert!(live.joined(), "a resumed player should carry on into the next round");
+    }
+
+    #[test]
+    fn a_refreshed_page_picks_a_solo_round_back_up_with_its_own_time() {
+        let mut game = Game::new();
+        let mut live = online();
+        let grid: Vec<String> = GRID.iter().map(|s| s.to_string()).collect();
+        let path: Vec<_> = (0..4).map(|col| crate::game::Position { row: 0, col }).collect();
+        game.pending_resume = Some(crate::game::SavedRound { round: None, grid, theme: None, time_left: 42.0, found: vec![("came".into(), path)] });
+        live.update(&mut game, Some(&me()), 0.0);
+        assert_eq!((game.phase, game.round, game.time_left), (Phase::Playing, None, 42.0));
+        assert_eq!(game.found_words(), vec!["came".to_string()]);
+    }
+
+    #[test]
+    fn a_round_that_ended_while_the_page_was_closed_is_banked_and_handed_in() {
+        let mut game = Game::new();
+        let mut live = online();
+        serve(&live, 40, "results", 20.0, 0.0);
+        live.update(&mut game, Some(&me()), 0.0);
+        accept_name(&live);
+        let grid: Vec<String> = GRID.iter().map(|s| s.to_string()).collect();
+        let path: Vec<_> = (0..4).map(|col| crate::game::Position { row: 0, col }).collect();
+        game.pending_resume = Some(crate::game::SavedRound {
+            round: Some(40),
+            grid,
+            theme: None,
+            time_left: 30.0,
+            found: vec![("came".into(), path)],
+        });
+        let games = game.ranking.lifetime.games;
+        live.update(&mut game, Some(&me()), 1.0);
+        assert_eq!(game.phase, Phase::Ready);
+        assert!(game.pending_resume.is_none());
+        assert_eq!(game.ranking.lifetime.games, games + 1, "the saved round was not banked");
+        let scores = sent_matching(&live, "POST /score");
+        assert_eq!(scores.len(), 1, "the saved round was not handed in");
+        assert!(scores[0].contains("\"came\""));
     }
 
     #[test]

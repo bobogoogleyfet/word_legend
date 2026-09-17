@@ -52,6 +52,9 @@ pub struct Entry {
     /// everything it had was final.
     #[serde(default = "final_by_default", rename = "final")]
     pub finished: bool,
+    /// The player's league, as their game reported it.
+    #[serde(default)]
+    pub league: Option<usize>,
 }
 
 fn final_by_default() -> bool {
@@ -87,6 +90,8 @@ struct ScoreRequest<'a> {
     /// The tiles traced for each word, for the letter bonus.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     paths: &'a [Vec<u8>],
+    /// The player's league, shown beside their name on the leaderboard.
+    league: usize,
 }
 
 /// How the game is currently getting its boards.
@@ -255,12 +260,12 @@ impl Client {
 
     /// Hand the round's words over to be scored. The score comes back from the
     /// server; whatever the client thinks it earned is not part of the request.
-    pub fn submit(&self, id: &str, round: u64, words: &[String], paths: &[Vec<u8>]) {
+    pub fn submit(&self, id: &str, round: u64, words: &[String], paths: &[Vec<u8>], league: usize) {
         if !self.is_configured() {
             return;
         }
         let shared = Arc::clone(&self.shared);
-        let body = serde_json::to_vec(&ScoreRequest { id, round, words, paths }).unwrap_or_default();
+        let body = serde_json::to_vec(&ScoreRequest { id, round, words, paths, league }).unwrap_or_default();
 
         self.fetch(post(format!("{}/score", self.base), body), move |result| {
             let answered = matches!(&result, Ok(r) if r.ok || r.status < 500);
@@ -277,11 +282,11 @@ impl Client {
     /// leaderboard from the moment they join, so it is complete the moment the
     /// round ends. Nothing is banked; a refusal (the round just ended) is expected
     /// and ignored.
-    pub fn progress(&self, id: &str, round: u64, words: &[String], paths: &[Vec<u8>]) {
+    pub fn progress(&self, id: &str, round: u64, words: &[String], paths: &[Vec<u8>], league: usize) {
         if !self.is_configured() {
             return;
         }
-        let body = serde_json::to_vec(&ScoreRequest { id, round, words, paths }).unwrap_or_default();
+        let body = serde_json::to_vec(&ScoreRequest { id, round, words, paths, league }).unwrap_or_default();
         self.fetch(post(format!("{}/progress", self.base), body), |_| {});
     }
 

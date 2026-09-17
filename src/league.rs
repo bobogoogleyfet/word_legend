@@ -41,15 +41,19 @@ pub struct LeagueDef {
     pub threshold: u32,
 }
 
-/// Thresholds are a starting point, not a measurement: they want retuning once
-/// there are real scores from real three-minute rounds to look at.
+/// Each league asks more than the last, and the gaps widen toward the top, so the
+/// upper leagues are for players who are consistently very good rather than ones
+/// who had a lucky run. Set with superwords at 20,000 every fifth round and the
+/// letter bonus in mind: finding every superword lifts an average by about 4,000,
+/// so Hero still takes 26,000 a round from everything else. Retune with real
+/// scores once there are enough of them.
 pub const LEAGUES: [LeagueDef; 6] = [
     LeagueDef { name: "Bronze", threshold: 0 },
-    LeagueDef { name: "Silver", threshold: 2_500 },
-    LeagueDef { name: "Gold", threshold: 5_000 },
-    LeagueDef { name: "Platinum", threshold: 8_000 },
-    LeagueDef { name: "Diamond", threshold: 12_000 },
-    LeagueDef { name: "Hero", threshold: 18_000 },
+    LeagueDef { name: "Silver", threshold: 4_000 },
+    LeagueDef { name: "Gold", threshold: 8_000 },
+    LeagueDef { name: "Platinum", threshold: 13_000 },
+    LeagueDef { name: "Diamond", threshold: 20_000 },
+    LeagueDef { name: "Hero", threshold: 30_000 },
 ];
 
 pub const TOP_LEAGUE: usize = LEAGUES.len() - 1;
@@ -328,7 +332,7 @@ mod tests {
 
     #[test]
     fn falling_below_the_floor_drops_a_league_without_waiting_for_five_rounds() {
-        let mut r = ranked(2, &[6_000]);
+        let mut r = ranked(2, &[9_000]);
         let change = r.record(1_000);
         assert_eq!(change.movement, Movement::Relegated, "an average under Gold's floor kept Gold");
         assert_eq!(r.league, 1);
@@ -336,8 +340,8 @@ mod tests {
 
     #[test]
     fn a_saved_league_the_average_no_longer_holds_is_left_on_load() {
-        let r = Ranking::from_text("version=3\nbest=9000\nleague=3\nrecent=3000,3000\n");
-        assert_eq!(r.league, 1, "Platinum on paper with a 3,000 average should settle in Silver");
+        let r = Ranking::from_text("version=3\nbest=9000\nleague=3\nrecent=5000,5000\n");
+        assert_eq!(r.league, 1, "Platinum on paper with a 5,000 average should settle in Silver");
         let r = Ranking::from_text("version=3\nleague=3\nrecent=\n");
         assert_eq!(r.league, 3, "no rounds on record is no evidence to move on");
     }
@@ -419,11 +423,18 @@ mod tests {
     }
 
     #[test]
+    fn the_leagues_get_harder_toward_the_top() {
+        let gaps: Vec<u32> = LEAGUES.windows(2).map(|w| w[1].threshold - w[0].threshold).collect();
+        assert!(gaps.windows(2).all(|g| g[1] >= g[0]), "each league should ask at least as much more as the last: {gaps:?}");
+        assert!(LEAGUES[TOP_LEAGUE].threshold >= 30_000, "the top league should be hard to reach");
+    }
+
+    #[test]
     fn a_move_is_announced_in_words() {
-        let mut up = ranked(0, &[3_000; 9]);
-        assert_eq!(up.record(3_000).headline(), "Promoted to SILVER");
-        let mut down = ranked(2, &[1_000; 9]);
-        assert_eq!(down.record(1_000).headline(), "Dropped to SILVER");
+        let mut up = ranked(0, &[5_000; 9]);
+        assert_eq!(up.record(5_000).headline(), "Promoted to SILVER");
+        let mut down = ranked(2, &[5_000; 9]);
+        assert_eq!(down.record(5_000).headline(), "Dropped to SILVER");
     }
 
     #[test]
@@ -446,7 +457,7 @@ mod tests {
     #[test]
     fn a_single_bad_round_does_not_cost_a_league() {
         // Comfortably in Gold on average, then one disaster.
-        let mut r = ranked(2, &[6_000; 9]);
+        let mut r = ranked(2, &[10_000; 9]);
         let change = r.record(0);
         assert_eq!(change.movement, Movement::Held);
         assert_eq!(r.league, 2);
@@ -475,14 +486,14 @@ mod tests {
     #[test]
     fn a_sustained_run_promotes() {
         let mut r = Ranking::new();
-        let mut change = r.record(6_000);
+        let mut change = r.record(9_000);
         for _ in 0..5 {
-            change = r.record(6_000);
+            change = r.record(9_000);
         }
-        // 6000 clears Silver (2500) and Gold (5000) but not Platinum (8000).
+        // 9000 clears Silver (4000) and Gold (8000) but not Platinum (13000).
         assert_eq!(change.movement, Movement::Promoted);
         assert!(r.league >= 1);
-        assert!(LEAGUES[r.league].threshold <= 6_000);
+        assert!(LEAGUES[r.league].threshold <= 9_000);
     }
 
     #[test]
