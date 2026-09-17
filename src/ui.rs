@@ -836,6 +836,8 @@ impl WordLegendApp {
             FontId::proportional(size),
             if selected || flashing { Color32::WHITE } else { TEXT },
         );
+
+        use_stars(painter, rect, self.game.tile_uses[pos.row][pos.col]);
     }
 
     fn draw_trail(&self, painter: &egui::Painter, geom: &BoardGeometry) {
@@ -1366,6 +1368,7 @@ impl WordLegendApp {
                     FontId::proportional(rect.width() * 0.45),
                     if uses == 0 { MUTED } else { TEXT },
                 );
+                use_stars(&painter, rect, uses);
             }
         }
 
@@ -1996,6 +1999,22 @@ fn copy_icon(ui: &mut egui::Ui, rect: Rect, copied: bool) -> egui::Response {
         painter.rect_stroke(front, 2.0, stroke, egui::StrokeKind::Middle);
     }
     response
+}
+
+/// Stars in a tile's bottom-right corner for the words it has been used in: a
+/// yellow star once it has been used, and a green one beside it once it has been
+/// used twice -- so it is plain which letters are still waiting to be used.
+fn use_stars(painter: &egui::Painter, tile: Rect, uses: u32) {
+    if uses == 0 {
+        return;
+    }
+    let size = (tile.width() * 0.2).max(7.0);
+    let inset = tile.width() * 0.07;
+    let corner = tile.right_bottom() - Vec2::splat(inset);
+    painter.text(corner, Align2::RIGHT_BOTTOM, "\u{2605}", FontId::proportional(size), GOLD);
+    if uses >= 2 {
+        painter.text(corner - Vec2::new(size * 0.95, 0.0), Align2::RIGHT_BOTTOM, "\u{2605}", FontId::proportional(size), GREEN);
+    }
 }
 
 /// WORD over LEGEND in coloured letter tiles.
@@ -2784,6 +2803,43 @@ mod tests {
         let (p, o) = (Position { row: 1, col: 1 }, Position { row: 2, col: 2 });
         for offset in [-0.25 * g.tile, 0.25 * g.tile] {
             assert_eq!(offset_drag(&g, p, o, offset), vec![p, o], "{offset}px off the diagonal picked up a neighbour");
+        }
+    }
+
+    #[test]
+    fn used_letters_wear_a_yellow_star_and_reused_ones_a_green_one_too() {
+        let mut app = offline_app(true);
+        app.game.start_round();
+        app.game.tile_uses = [[0; SIZE]; SIZE];
+        app.game.tile_uses[0][0] = 1;
+        app.game.tile_uses[2][3] = 2;
+        app.game.tile_uses[3][1] = 5;
+        let (_, shapes) = run_frames(&mut app, Vec2::new(1000.0, 780.0), 4);
+
+        let stars: Vec<(Color32, Pos2)> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) if t.galley.job.text == "\u{2605}" => {
+                    Some((t.galley.job.sections[0].format.color, s.visual_bounding_rect().center()))
+                }
+                _ => None,
+            })
+            .collect();
+        let yellow = stars.iter().filter(|(c, _)| *c == GOLD).count();
+        let green = stars.iter().filter(|(c, _)| *c == GREEN).count();
+        assert_eq!((yellow, green), (3, 2), "one yellow per used tile, one green per reused tile: {stars:?}");
+
+        // Each sits in the bottom-right quarter of its own tile.
+        let board_tiles: Vec<Rect> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Rect(r) if r.fill == TILE => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        for (_, at) in &stars {
+            let tile = board_tiles.iter().find(|t| t.contains(*at)).expect("a star outside every tile");
+            assert!(at.x > tile.center().x && at.y > tile.center().y, "star at {at:?} is not bottom-right in {tile:?}");
         }
     }
 
