@@ -292,6 +292,22 @@ await test("players finishing at the same moment all reach the leaderboard", asy
   assert.deepEqual(scores, [...scores].sort((a, b) => b - a), "the table is not best-first");
 });
 
+await test("everyone who played a round is on its table", async () => {
+  const e = env();
+  const id = (i) => `${String(i).padStart(2, "0")}23456789ABCDEF`.slice(0, 16);
+  for (let i = 0; i < 60; i++) {
+    await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: id(i), name: `player${i}` }) });
+    await call(e, "/score", { method: "POST", body: JSON.stringify({ id: id(i), round: roundInfo.round, words: realWords.slice(0, (i % 5) + 1) }) });
+  }
+  const table = (await body(await call(e, `/leaderboard?round=${roundInfo.round}`))).entries;
+  assert.equal(table.length, 60, "the table left players out");
+  const scores = table.map((r) => r.score);
+  assert.deepEqual(scores, [...scores].sort((a, b) => b - a), "the table is not best-first");
+
+  const few = (await body(await call(e, `/leaderboard?round=${roundInfo.round}&limit=10`))).entries;
+  assert.equal(few.length, 10, "a smaller page was not honoured");
+});
+
 await test("a resubmission replaces the player's row rather than adding one", async () => {
   const e = env();
   await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });

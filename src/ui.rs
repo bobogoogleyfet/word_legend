@@ -3441,6 +3441,53 @@ mod tests {
         }
     }
 
+    /// A big round's table lists everyone, however many played.
+    #[test]
+    fn the_round_table_shows_every_player() {
+        for size in [PHONES[0], Vec2::new(1000.0, 780.0)] {
+            let mut app = offline_app(true);
+            app.game.start_round();
+            app.game.round = Some(7);
+            app.game.score = 9_000;
+            app.game.time_left = 0.0;
+            app.game.tick(0.2);
+            let mut entries: Vec<net::Entry> = (0..60)
+                .map(|i| net::Entry { name: format!("player{i:02}"), score: 30_000 - i * 400, words: 40 - i / 4, finished: true, league: Some(2) })
+                .collect();
+            entries[40] = net::Entry { name: "longest_name_16c".into(), score: 30_000 - 40 * 400, words: 20, finished: true, league: Some(1) };
+            app.live.show_leaderboard(net::Leaderboard { round: 7, entries });
+
+            let ctx = egui::Context::default();
+            let screen = Rect::from_min_size(Pos2::ZERO, size);
+            let frame = |app: &mut WordLegendApp, events: Vec<egui::Event>| {
+                let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+                painted(ctx.run(input, |ctx| app.frame(ctx)).shapes)
+            };
+            let mut shapes = Vec::new();
+            for _ in 0..8 {
+                shapes = frame(&mut app, vec![]);
+            }
+            let texts = texts_of(&shapes);
+            assert!(texts.iter().any(|t| t == "player00"), "the table is not showing at {size:?}");
+            assert!(
+                texts.iter().any(|t| t == "you're #41 of 60") || texts.iter().any(|t| t == "Players (60)"),
+                "the table does not say how many played at {size:?}: {texts:?}"
+            );
+
+            // The last player is down the list; scrolling the table reaches them.
+            let over = text_centre(&shapes, "player00").expect("the first row") + Vec2::new(0.0, 30.0);
+            frame(&mut app, vec![egui::Event::PointerMoved(over)]);
+            for _ in 0..40 {
+                shapes = frame(
+                    &mut app,
+                    vec![egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -400.0), modifiers: Default::default() }],
+                );
+            }
+            let texts = texts_of(&shapes);
+            assert!(texts.iter().any(|t| t == "player59"), "the last player cannot be reached at {size:?}");
+        }
+    }
+
     /// Any word in the scorecard's lists can be tapped to draw its path.
     #[test]
     fn tapping_a_word_in_the_lists_shows_its_path() {

@@ -135,7 +135,7 @@ other. A player's league on the leaderboard is as their game reports it.
 | `POST /claim` | `{id, name}` — take a display name |
 | `POST /progress` | `{id, round, words[], paths[], league}` — progress while playing; nothing banked |
 | `POST /score` | `{id, round, words[], paths[], league}` — the final score, scored and banked in the player's Durable Object |
-| `GET /leaderboard?round=` | names, scores, word counts, leagues and whether each is final |
+| `GET /leaderboard?round=&limit=` | everyone who played that round: names, scores, word counts, leagues and whether each is final (up to 200 by default) |
 | `GET /standings?limit=` | the all-time table: names, leagues, averages, best rounds and games played |
 
 The board's word list is never sent to clients: they work it out themselves, and

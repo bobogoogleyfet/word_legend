@@ -360,15 +360,19 @@ async function getStandings(request, env, url) {
 async function getLeaderboard(request, env, url) {
   const round = parseInt(url.searchParams.get("round") ?? "", 10);
   const target = Number.isFinite(round) ? round : schedule(env, Date.now() / 1000).round;
+  // Everyone who played a round belongs on its table, so the cap is high enough
+  // that it is the page, not the round, that ever runs out of room.
+  const asked = parseInt(url.searchParams.get("limit") ?? "", 10);
+  const limit = Number.isFinite(asked) ? Math.min(Math.max(asked, 1), 500) : 200;
   // Ids stay inside the Durable Object: an id is the account, and a leaderboard
   // is public.
   const tableCache = cacheFor(tableCaches, env.LEADERBOARD);
   const cached = tableCache.get(target);
-  if (cached && Date.now() - cached.at < TABLE_CACHE_MS) {
-    return json(request, env, { round: target, entries: cached.entries });
+  if (cached && cached.limit >= limit && Date.now() - cached.at < TABLE_CACHE_MS) {
+    return json(request, env, { round: target, entries: cached.entries.slice(0, limit) });
   }
-  const entries = await leaderboard(env, target).table(50);
-  tableCache.set(target, { at: Date.now(), entries });
+  const entries = await leaderboard(env, target).table(limit);
+  tableCache.set(target, { at: Date.now(), limit, entries });
   return json(request, env, { round: target, entries });
 }
 

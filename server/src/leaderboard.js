@@ -53,7 +53,7 @@ export class Leaderboard extends DurableObject {
    * Names and scores, best first, and whether each is final yet. Account ids never
    * leave this object.
    */
-  async table(limit = 50) {
+  async table(limit = 200) {
     const rows = await this.ctx.storage.list({ prefix: "score:" });
     return [...rows.values()]
       .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
