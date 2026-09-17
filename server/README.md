@@ -74,7 +74,7 @@ cargo run --release --bin export_rounds -- rounds 1000 --all-months
 
 This writes the default rounds to `rounds/pack-N.json` and each month's rounds —
 favouring that month's seasonal theme — to `rounds/month-MM/pack-N.json`: 130
-packs, about 32 MB, in roughly half an hour on sixteen cores. Leave off
+packs, about 55 MB, in roughly forty minutes on sixteen cores. Leave off
 `--all-months` for just the default rounds, in a couple of minutes.
 
 A pack holds a hundred rounds, each with its grid, its theme (or `null` for a
