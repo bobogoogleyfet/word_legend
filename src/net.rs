@@ -47,6 +47,15 @@ pub struct Entry {
     pub name: String,
     pub score: u32,
     pub words: u32,
+    /// False while the player's final score is still to arrive: the row is
+    /// progress from the round. A server from before progress sends no flag, and
+    /// everything it had was final.
+    #[serde(default = "final_by_default", rename = "final")]
+    pub finished: bool,
+}
+
+fn final_by_default() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -261,6 +270,18 @@ impl Client {
         });
     }
 
+    /// Report the round so far, while it is played. The player is on the
+    /// leaderboard from the moment they join, so it is complete the moment the
+    /// round ends. Nothing is banked; a refusal (the round just ended) is expected
+    /// and ignored.
+    pub fn progress(&self, id: &str, round: u64, words: &[String]) {
+        if !self.is_configured() {
+            return;
+        }
+        let body = serde_json::to_vec(&ScoreRequest { id, round, words }).unwrap_or_default();
+        self.fetch(post(format!("{}/progress", self.base), body), |_| {});
+    }
+
     pub fn poll_leaderboard(&self, round: u64) {
         if !self.is_configured() {
             return;
@@ -421,10 +442,13 @@ mod tests {
 
     #[test]
     fn a_leaderboard_reply_is_understood() {
-        let json = r#"{"round":3,"entries":[{"name":"wordfan","score":5400,"words":12},
-            {"name":"wordsmith","score":3100,"words":9}]}"#;
+        let json = r#"{"round":3,"entries":[{"name":"wordfan","score":5400,"words":12,"final":true},
+            {"name":"wordsmith","score":3100,"words":9,"final":false},{"name":"old","score":10,"words":1}]}"#;
         let table: Leaderboard = serde_json::from_str(json).expect("should parse");
-        assert_eq!(table.entries.len(), 2);
+        assert_eq!(table.entries.len(), 3);
+        assert!(table.entries[0].finished);
+        assert!(!table.entries[1].finished, "a progress row must read as unfinished");
+        assert!(table.entries[2].finished, "a row with no flag is from an older server, and final");
         assert_eq!(table.entries[0].name, "wordfan");
         assert_eq!(table.entries[0].score, 5400);
     }

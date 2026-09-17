@@ -30,13 +30,12 @@ const SERIES_AVERAGE: Color32 = Color32::from_rgb(0xc9, 0x85, 0x00);
 /// The logo's tiles: black, with gold letters and a gold edge.
 const LOGO_TILE: Color32 = Color32::from_rgb(0x0a, 0x0a, 0x0c);
 
-/// The scorecard's tabs. The leaderboard opens first on a shared round.
+/// The phone scorecard's tabs: the leaderboard, which opens first on a shared
+/// round, or the word lists side by side.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ResultsTab {
     Leaderboard,
-    Common,
-    Obscure,
-    Highlight,
+    Words,
 }
 
 /// First-run screen state, kept out of the app struct's main body.
@@ -293,22 +292,24 @@ impl WordLegendApp {
 
     /// First run: hand over the recovery code, take a display name.
     fn overlay_signup(&mut self, ctx: &egui::Context) {
-        self.overlay(ctx, |app, ui| {
-            let pending = app.signup.pending.get_or_insert_with(Identity::generate).clone();
+        self.page(ctx, true, |app, ui| {
+            ui.vertical_centered(|ui| {
+                let pending = app.signup.pending.get_or_insert_with(Identity::generate).clone();
 
-            ui.label(egui::RichText::new("WORD LEGEND").size(38.0).color(TEXT).strong());
-            ui.label(
-                egui::RichText::new("No email, no password. Just a code and a name.")
-                    .size(13.0)
-                    .color(MUTED),
-            );
-            ui.add_space(20.0);
+                ui.label(egui::RichText::new("WORD LEGEND").size(38.0).color(TEXT).strong());
+                ui.label(
+                    egui::RichText::new("No email, no password. Just a code and a name.")
+                        .size(13.0)
+                        .color(MUTED),
+                );
+                ui.add_space(20.0);
 
-            if app.signup.restoring {
-                app.signup_restore(ui);
-            } else {
-                app.signup_new(ui, &pending);
-            }
+                if app.signup.restoring {
+                    app.signup_restore(ui);
+                } else {
+                    app.signup_new(ui, &pending);
+                }
+            });
         });
     }
 
@@ -1086,7 +1087,7 @@ impl WordLegendApp {
                 Some(round) if narrow => {
                     app.stacked(ui, |app, ui| app.leaderboard(ui, round));
                     ui.add_space(12.0);
-                    app.stacked(ui, |app, ui| app.word_tabs(ui));
+                    app.stacked(ui, |app, ui| app.word_list_columns(ui, 130.0));
                     ui.add_space(18.0);
                     let left = app.game.results_left.max(0.0);
                     ui.label(
@@ -1105,7 +1106,7 @@ impl WordLegendApp {
                         ui.add_space(16.0);
                         ui.vertical(|ui| {
                             ui.set_width((ui.available_width()).max(200.0));
-                            app.word_tabs(ui);
+                            app.word_list_columns(ui, 130.0);
                         });
                     });
                     ui.add_space(18.0);
@@ -1120,7 +1121,7 @@ impl WordLegendApp {
                     );
                 }
                 None => {
-                    app.word_tabs(ui);
+                    app.word_list_columns(ui, 130.0);
                     ui.add_space(18.0);
                     if big_button(ui, "NEXT ROUND", ACCENT) {
                         app.live.play_now(&mut app.game, app.now);
@@ -1190,15 +1191,17 @@ impl WordLegendApp {
         ui.separator();
 
         let list_height = (ui.available_height() - FOOTER).max(80.0);
-        egui::ScrollArea::vertical()
-            .id_salt("results_list")
-            .max_height(list_height)
-            .min_scrolled_height(list_height)
-            .auto_shrink([false, false])
-            .show(ui, |ui| match (self.current_tab(), self.game.round) {
-                (ResultsTab::Leaderboard, Some(round)) => self.leaderboard_rows(ui, round),
-                (tab, _) => self.word_columns(ui, tab),
-            });
+        match (self.current_tab(), self.game.round) {
+            (ResultsTab::Leaderboard, Some(round)) => {
+                egui::ScrollArea::vertical()
+                    .id_salt("results_players")
+                    .max_height(list_height)
+                    .min_scrolled_height(list_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.leaderboard_rows(ui, round));
+            }
+            _ => self.word_list_columns(ui, list_height),
+        }
 
         ui.add_space(6.0);
         ui.vertical_centered(|ui| {
@@ -1241,66 +1244,79 @@ impl WordLegendApp {
         }
     }
 
-    /// The tabs this scorecard offers, with counts: found of total for the word
-    /// lists, players for the leaderboard.
+    /// The tabs this scorecard offers: the leaderboard, with how many played, on a
+    /// shared round; the word lists always.
     fn tab_list(&self) -> Vec<(ResultsTab, String)> {
-        let found_of = |list: &mut dyn Iterator<Item = &String>| {
-            let words: Vec<&String> = list.collect();
-            let found = words.iter().filter(|w| self.game.has_found(w)).count();
-            format!("{found}/{}", words.len())
-        };
-        let (highlight, highlighted) = self.game.highlight_tab();
         let mut tabs = Vec::new();
         if let Some(round) = self.game.round {
             let players = self.live.leaderboard_for(round).map(|t| t.entries.len()).unwrap_or(0);
             tabs.push((ResultsTab::Leaderboard, format!("Players ({players})")));
         }
-        tabs.push((ResultsTab::Common, format!("Common ({})", found_of(&mut self.game.words.common.iter()))));
-        tabs.push((ResultsTab::Obscure, format!("Obscure ({})", found_of(&mut self.game.words.obscure.iter()))));
-        tabs.push((ResultsTab::Highlight, format!("{highlight} ({})", found_of(&mut highlighted.into_iter()))));
+        tabs.push((ResultsTab::Words, "Words".to_string()));
         tabs
     }
 
-    /// The selected tab, or Common where the leaderboard is not on offer.
+    /// The selected tab, or the word lists where there is no leaderboard.
     fn current_tab(&self) -> ResultsTab {
         match self.results_tab {
-            ResultsTab::Leaderboard if self.game.round.is_none() => ResultsTab::Common,
+            ResultsTab::Leaderboard if self.game.round.is_none() => ResultsTab::Words,
             tab => tab,
         }
     }
 
-    /// A word list in columns, each word with its points; found words picked out.
-    fn word_columns(&self, ui: &mut egui::Ui, tab: ResultsTab) {
-        let (_, highlighted) = self.game.highlight_tab();
-        let words: Vec<&String> = match tab {
-            ResultsTab::Obscure => self.game.words.obscure.iter().collect(),
-            ResultsTab::Highlight => highlighted,
-            _ => self.game.words.common.iter().collect(),
-        };
-        if words.is_empty() {
-            ui.label(egui::RichText::new("Nothing in this list for this board.").size(12.0).color(MUTED));
-            return;
-        }
-        let columns = ((ui.available_width() / 120.0).floor() as usize).clamp(1, 4);
-        let per_column = words.len().div_ceil(columns);
-        ui.columns(columns, |cols| {
-            for (i, word) in words.iter().enumerate() {
-                let col = &mut cols[i / per_column];
-                let found = self.game.has_found(word);
-                col.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(word.as_str())
-                            .size(13.0)
-                            .color(if found { GREEN } else { TEXT }),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(crate::game::word_points(word.len()).to_string())
-                                .size(12.0)
-                                .color(MUTED),
-                        );
+    /// Common, Obscure and the board's own list as three columns side by side,
+    /// each headed with found of total and scrolling on its own, the way WordHero
+    /// laid them out. Found words are picked out in green, each with its points.
+    fn word_list_columns(&self, ui: &mut egui::Ui, height: f32) {
+        /// The column header and the rule under it.
+        const HEADER: f32 = 26.0;
+        let (highlight, highlighted) = self.game.highlight_tab();
+        let lists: [(String, Vec<&String>); 3] = [
+            ("Common".to_string(), self.game.words.common.iter().collect()),
+            ("Obscure".to_string(), self.game.words.obscure.iter().collect()),
+            (highlight, highlighted),
+        ];
+        let body = (height - HEADER).max(40.0);
+
+        ui.columns(3, |cols| {
+            for (i, (col, (name, words))) in cols.iter_mut().zip(lists).enumerate() {
+                col.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                let found = words.iter().filter(|w| self.game.has_found(w)).count();
+                col.label(egui::RichText::new(format!("{name} ({found}/{})", words.len())).size(12.0).color(TEXT).strong());
+                col.separator();
+                egui::ScrollArea::vertical()
+                    .id_salt(("word_column", i))
+                    .max_height(body)
+                    .min_scrolled_height(body)
+                    .auto_shrink([false, false])
+                    .show(col, |ui| {
+                        if words.is_empty() {
+                            ui.label(egui::RichText::new("None on this board").size(11.0).color(MUTED));
+                            return;
+                        }
+                        let width = ui.available_width();
+                        for word in words {
+                            let found = self.game.has_found(word);
+                            ui.horizontal(|ui| {
+                                // The word gives way to its points when space is short.
+                                ui.allocate_ui(Vec2::new((width - 30.0).max(20.0), 16.0), |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(word.as_str()).size(12.0).color(if found { GREEN } else { TEXT }),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(
+                                        egui::RichText::new(crate::game::word_points(word.len()).to_string())
+                                            .size(11.0)
+                                            .color(MUTED),
+                                    );
+                                });
+                            });
+                        }
                     });
-                });
             }
         });
     }
@@ -1355,7 +1371,9 @@ impl WordLegendApp {
                 );
                 ui.label(egui::RichText::new(&entry.name).size(13.0).color(color).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(format!("{} words", entry.words)).size(11.0).color(MUTED));
+                    // A row still waiting on its final score shows as it stood.
+                    let detail = if entry.finished { format!("{} words", entry.words) } else { "finishing…".to_string() };
+                    ui.label(egui::RichText::new(detail).size(11.0).color(MUTED));
                     ui.label(egui::RichText::new(thousands(entry.score as usize)).size(13.0).color(color).strong());
                 });
             });
@@ -1428,57 +1446,6 @@ impl WordLegendApp {
                 ui.label(egui::RichText::new(value).size(14.0).color(TEXT).strong());
             });
         }
-    }
-
-    /// Common / Obscure / Theme, the way WordHero split its word list.
-    fn word_tabs(&mut self, ui: &mut egui::Ui) {
-        // The leaderboard has its own column on a desktop; its tab is left out.
-        let tabs: Vec<(ResultsTab, String)> =
-            self.tab_list().into_iter().filter(|(t, _)| *t != ResultsTab::Leaderboard).collect();
-        let current = match self.current_tab() {
-            ResultsTab::Leaderboard => ResultsTab::Common,
-            tab => tab,
-        };
-
-        ui.horizontal(|ui| {
-            for (tab, label) in &tabs {
-                let selected = current == *tab;
-                let text = egui::RichText::new(label).size(13.0).color(if selected { TEXT } else { MUTED }).strong();
-                if ui.selectable_label(selected, text).clicked() {
-                    self.results_tab = *tab;
-                }
-            }
-        });
-
-        let (_, highlighted) = self.game.highlight_tab();
-        let words: Vec<&String> = match current {
-            ResultsTab::Obscure => self.game.words.obscure.iter().collect(),
-            ResultsTab::Highlight => highlighted,
-            _ => self.game.words.common.iter().collect(),
-        };
-
-        ui.add_space(6.0);
-        egui::ScrollArea::vertical()
-            .id_salt("word_tabs")
-            .max_height(96.0)
-            .show(ui, |ui| {
-                if words.is_empty() {
-                    ui.label(egui::RichText::new("Nothing in this list for this board.").size(12.0).color(MUTED));
-                    return;
-                }
-                ui.horizontal_wrapped(|ui| {
-                    for word in words.iter().take(300) {
-                        // Found words are picked out; the rest are what you left behind.
-                        let found = self.game.has_found(word);
-                        ui.label(
-                            egui::RichText::new(word.to_uppercase())
-                                .size(13.0)
-                                .color(if found { GREEN } else { MUTED })
-                                .strong(),
-                        );
-                    }
-                });
-            });
     }
 
     /// Your last ten rounds, the average they make, and how far that is from the
@@ -1735,8 +1702,8 @@ impl WordLegendApp {
         });
     }
 
-    /// A screen of its own. On a phone it fills the screen; elsewhere it is the
-    /// usual centred card. `scroll` lets a long page scroll; the phone scorecard
+    /// A screen of its own: every dialog goes through here. On a phone it fills
+    /// the screen; elsewhere it is the usual centred card. `scroll` lets a long page scroll; the phone scorecard
     /// passes false, since it is laid out to fit and scrolls only its word list.
     fn page(&mut self, ctx: &egui::Context, scroll: bool, contents: impl FnOnce(&mut Self, &mut egui::Ui)) {
         if !is_narrow(ctx) {
@@ -2453,7 +2420,7 @@ mod tests {
                 if shared {
                     app.game.round = Some(7);
                     let entries = (0..12)
-                        .map(|i| net::Entry { name: format!("player_name_{i:02}"), score: 20_000 - i * 900, words: 30 })
+                        .map(|i| net::Entry { name: format!("player_name_{i:02}"), score: 20_000 - i * 900, words: 30, finished: true })
                         .collect();
                     app.live.show_leaderboard(net::Leaderboard { round: 7, entries });
                 }
@@ -2483,8 +2450,8 @@ mod tests {
         app.live.show_leaderboard(net::Leaderboard {
             round: 7,
             entries: vec![
-                net::Entry { name: "someone".into(), score: 5_000, words: 12 },
-                net::Entry { name: "longest_name_16c".into(), score: 0, words: 0 },
+                net::Entry { name: "someone".into(), score: 5_000, words: 12, finished: true },
+                net::Entry { name: "longest_name_16c".into(), score: 0, words: 0, finished: true },
             ],
         });
         let (_, shapes) = run_frames(&mut app, Vec2::new(1000.0, 780.0), 4);
@@ -2578,7 +2545,7 @@ mod tests {
         let mut app = app_after_round();
         app.game.round = Some(7);
         let entries = (0..40)
-            .map(|i| net::Entry { name: format!("player_{i:02}"), score: 20_000 - i * 400, words: 30 })
+            .map(|i| net::Entry { name: format!("player_{i:02}"), score: 20_000 - i * 400, words: 30, finished: true })
             .collect();
         app.live.show_leaderboard(net::Leaderboard { round: 7, entries });
 
@@ -2884,7 +2851,7 @@ mod tests {
             app.game.time_left = 0.0;
             app.game.tick(0.2);
             let entries = (0..30)
-                .map(|i| net::Entry { name: format!("player_name_{i:02}"), score: 20_000 - i * 500, words: 30 })
+                .map(|i| net::Entry { name: format!("player_name_{i:02}"), score: 20_000 - i * 500, words: 30, finished: i % 2 == 0 })
                 .collect();
             app.live.show_leaderboard(net::Leaderboard { round: 7, entries });
 
@@ -2900,11 +2867,108 @@ mod tests {
                 .expect("no countdown");
             assert!(countdown.max.y <= size.y, "the countdown is off screen at {size:?}: {countdown:?}");
 
-            // Opens on the leaderboard, and offers the word lists as tabs.
+            // Opens on the leaderboard, with the word lists a tab away.
             assert!(texts.iter().any(|t| t == "Players (30)"), "no players tab: {texts:?}");
-            assert!(texts.iter().any(|t| t.starts_with("Common (")), "no Common tab");
+            assert!(texts.iter().any(|t| t == "Words"), "no words tab");
             assert!(texts.iter().any(|t| t == "player_name_00"), "the leaderboard is not the open tab");
+            assert!(texts.iter().any(|t| t == "finishing…"), "a player still finishing is not shown as such");
             assert!(texts.iter().any(|t| t == "9,000"), "the score is not beside the board");
+        }
+    }
+
+    /// The word lists are three columns side by side, and each scrolls on its own.
+    #[test]
+    fn each_word_list_is_its_own_scrolling_column() {
+        for size in [PHONES[0], PHONES[1], Vec2::new(1000.0, 780.0)] {
+            let mut app = offline_app(true);
+            app.game.start_round();
+            app.game.round = Some(7);
+            app.game.score = 9_000;
+            app.game.time_left = 0.0;
+            app.game.tick(0.2);
+            app.results_tab = ResultsTab::Words;
+            // Plenty in every list, so each has something to scroll.
+            app.game.words.common = (0..80).map(|i| format!("common{i:02}")).collect();
+            app.game.words.obscure = (0..80).map(|i| format!("obscure{i:02}")).collect();
+            app.game.theme = Some("Animals".into());
+            app.game.words.theme = (0..80).map(|i| format!("animal{i:02}")).collect();
+
+            let ctx = egui::Context::default();
+            let screen = Rect::from_min_size(Pos2::ZERO, size);
+            let frame = |app: &mut WordLegendApp, events: Vec<egui::Event>| {
+                let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+                painted(ctx.run(input, |ctx| app.frame(ctx)).shapes)
+            };
+            let mut shapes = Vec::new();
+            for _ in 0..12 {
+                shapes = frame(&mut app, vec![]);
+            }
+            assert_fits("word columns", &shapes, size);
+
+            let find = |shapes: &[egui::Shape], text: &str| {
+                shapes.iter().find_map(|s| match s {
+                    egui::Shape::Text(t) if t.galley.job.text == text => Some(s.visual_bounding_rect()),
+                    _ => None,
+                })
+            };
+            let headers: Vec<Rect> = ["Common (0/80)", "Obscure (0/80)", "Animals (0/80)"]
+                .iter()
+                .map(|h| find(&shapes, h).unwrap_or_else(|| panic!("no {h} header at {size:?}: {:?}", texts_of(&shapes))))
+                .collect();
+            assert!(
+                headers.windows(2).all(|w| w[1].min.x > w[0].max.x && (w[1].min.y - w[0].min.y).abs() < 2.0),
+                "the lists are not side by side at {size:?}: {headers:?}"
+            );
+
+            // Scroll over the Common column only.
+            let common_first = find(&shapes, "common00").expect("common00 drawn");
+            let obscure_first = find(&shapes, "obscure00").expect("obscure00 drawn");
+            let over_common = common_first.center() + Vec2::new(0.0, 40.0);
+            frame(&mut app, vec![egui::Event::PointerMoved(over_common)]);
+            frame(
+                &mut app,
+                vec![egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -300.0), modifiers: Default::default() }],
+            );
+            for _ in 0..30 {
+                shapes = frame(&mut app, vec![]);
+            }
+            let common_after = find(&shapes, "common00").map(|r| r.min.y).unwrap_or(f32::MIN);
+            let obscure_after = find(&shapes, "obscure00").expect("obscure00 still drawn").min.y;
+            assert!(common_after < common_first.min.y - 50.0, "the Common column did not scroll at {size:?}");
+            assert!((obscure_after - obscure_first.min.y).abs() < 1.0, "scrolling Common moved Obscure too at {size:?}");
+        }
+    }
+
+    /// On a phone every dialog is a whole screen, not a card over the board.
+    #[test]
+    fn every_dialog_is_full_screen_on_a_phone() {
+        for size in PHONES.iter().take(2).copied() {
+            let screens: [(&str, fn(&mut WordLegendApp)); 5] = [
+                ("signup", |app| app.identity = None),
+                ("restore", |app| {
+                    app.identity = None;
+                    app.signup.restoring = true;
+                }),
+                ("home", |_| {}),
+                ("stats", |app| app.show_stats = true),
+                ("results", |app| {
+                    app.game.start_round();
+                    app.game.score = 1_000;
+                    app.game.time_left = 0.0;
+                    app.game.tick(0.2);
+                }),
+            ];
+            for (name, set_up) in screens {
+                let mut app = offline_app(true);
+                set_up(&mut app);
+                let (ctx, _) = run_frames(&mut app, size, 4);
+                let page = egui::AreaState::load(&ctx, egui::Id::new("page"));
+                assert!(page.is_some(), "{name} at {size:?} is not a full-screen page");
+                assert!(
+                    egui::AreaState::load(&ctx, egui::Id::new("overlay")).is_none(),
+                    "{name} at {size:?} is still a card"
+                );
+            }
         }
     }
 

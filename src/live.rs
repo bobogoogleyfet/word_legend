@@ -23,10 +23,17 @@ const POLL_DOWN: f64 = 15.0;
 const POLL_URGENT: f64 = 2.0;
 /// How long to wait for a first answer before giving up and playing solo.
 const CONNECT_GRACE: f64 = 6.0;
-/// Scorecard refresh, so late submissions show up while it is still open.
+/// Scorecard refresh while final scores are still landing, just after a round.
+const LEADERBOARD_EVERY_EARLY: f64 = 2.0;
+/// How long after handing in to keep refreshing at the early rate.
+const LEADERBOARD_EARLY_FOR: f64 = 12.0;
+/// Scorecard refresh after that, for stragglers.
 const LEADERBOARD_EVERY: f64 = 5.0;
-/// First table read after handing in, giving the server a moment to file it.
-const LEADERBOARD_FIRST: f64 = 1.5;
+/// First table read after handing in. Everyone who played is already on the
+/// table from their progress, so there is no need to wait long.
+const LEADERBOARD_FIRST: f64 = 0.5;
+/// How often progress is reported while a round is played, when there is news.
+const PROGRESS_EVERY: f64 = 4.0;
 /// Joining a round with less than this left is not worth it; wait for the next.
 pub const MIN_JOIN_SECONDS: f32 = 15.0;
 
@@ -74,7 +81,12 @@ pub struct Live {
 
     /// The last round whose words were handed in.
     submitted: Option<u64>,
+    /// When the words were handed in.
+    submitted_at: f64,
     next_leaderboard: f64,
+    /// The round progress is being reported for, when it was last sent, and how
+    /// many words that report held.
+    progress: Option<(u64, f64, usize)>,
 }
 
 impl Live {
@@ -94,7 +106,9 @@ impl Live {
             claim_for: None,
             last_claim: None,
             submitted: None,
+            submitted_at: 0.0,
             next_leaderboard: 0.0,
+            progress: None,
         }
     }
 
@@ -313,9 +327,27 @@ impl Live {
         }
     }
 
-    /// Hand the words in once the shared round is over, then keep the table fresh.
+    /// Report progress while the shared round is played, hand the words in once
+    /// it is over, then keep the table fresh.
     fn hand_in(&mut self, game: &Game, me: &Identity, now: f64) {
         let Some(round) = game.round else { return };
+
+        // On the table from the moment of joining, then kept roughly current: a
+        // report straight away, then one every few seconds when there are new words.
+        if game.phase == Phase::Playing && self.name == NameStatus::Claimed {
+            let found = game.found.len();
+            let due = match self.progress {
+                Some((r, sent_at, sent_words)) if r == round => {
+                    found != sent_words && now - sent_at >= PROGRESS_EVERY
+                }
+                _ => true,
+            };
+            if due {
+                self.client.progress(&me.id, round, &game.found_words());
+                self.progress = Some((round, now, found));
+            }
+        }
+
         // The server only takes a round during its own scorecard window.
         let open = game.phase == Phase::Over
             && self.clock.is_some_and(|c| c.round == round && !c.playing);
@@ -326,11 +358,13 @@ impl Live {
         if self.submitted != Some(round) && self.name == NameStatus::Claimed {
             self.client.submit(&me.id, round, &game.found_words());
             self.submitted = Some(round);
+            self.submitted_at = now;
             self.next_leaderboard = now + LEADERBOARD_FIRST;
         }
         if self.submitted == Some(round) && now >= self.next_leaderboard {
             self.client.poll_leaderboard(round);
-            self.next_leaderboard = now + LEADERBOARD_EVERY;
+            let early = now - self.submitted_at < LEADERBOARD_EARLY_FOR;
+            self.next_leaderboard = now + if early { LEADERBOARD_EVERY_EARLY } else { LEADERBOARD_EVERY };
         }
     }
 }
@@ -523,6 +557,51 @@ mod tests {
         live.update(&mut game, Some(&me()), 5.0);
         assert_eq!(game.round, Some(40), "should be back on the shared board");
         assert!(sent_matching(&live, "POST /score").is_empty(), "solo rounds are never handed in");
+    }
+
+    #[test]
+    fn a_player_is_on_the_table_from_joining_and_it_is_read_straight_after_the_round() {
+        let mut game = Game::new();
+        let mut live = online();
+        serve(&live, 40, "play", 100.0, 0.0);
+        live.update(&mut game, Some(&me()), 0.0);
+        accept_name(&live);
+        live.update(&mut game, Some(&me()), 0.1);
+        live.play_now(&mut game, 0.1);
+
+        // Joining reports at once, with nothing found yet.
+        live.update(&mut game, Some(&me()), 0.2);
+        let reports = sent_matching(&live, "POST /progress");
+        assert_eq!(reports.len(), 1, "joining should report straight away: {reports:?}");
+        assert!(reports[0].contains("\"round\":40") && reports[0].contains("\"words\":[]"));
+
+        // Nothing new, nothing sent; a new word is sent, but not more than every few seconds.
+        live.update(&mut game, Some(&me()), 10.0);
+        assert_eq!(sent_matching(&live, "POST /progress").len(), 1, "reported with no news");
+        for col in 0..4 {
+            game.extend_path(crate::game::Position { row: 0, col });
+        }
+        game.submit_path();
+        live.update(&mut game, Some(&me()), 10.5);
+        assert_eq!(sent_matching(&live, "POST /progress").len(), 2, "a new word was not reported");
+        game.found.push(crate::game::FoundWord { word: "mace".into(), points: 400 });
+        live.update(&mut game, Some(&me()), 11.0);
+        assert_eq!(sent_matching(&live, "POST /progress").len(), 2, "reported again within seconds");
+        live.update(&mut game, Some(&me()), 15.0);
+        assert_eq!(sent_matching(&live, "POST /progress").len(), 3);
+
+        // The round ends: the final score goes in, and the table is read within a
+        // second, then every couple of seconds while scores land.
+        live.update(&mut game, Some(&me()), 100.5);
+        assert_eq!(game.phase, Phase::Over);
+        assert_eq!(sent_matching(&live, "POST /score").len(), 1);
+        live.update(&mut game, Some(&me()), 101.0);
+        assert_eq!(sent_matching(&live, "GET /leaderboard").len(), 1, "the table was not read straight after the round");
+        live.update(&mut game, Some(&me()), 102.0);
+        assert_eq!(sent_matching(&live, "GET /leaderboard").len(), 1);
+        live.update(&mut game, Some(&me()), 103.1);
+        assert_eq!(sent_matching(&live, "GET /leaderboard").len(), 2);
+        assert_eq!(sent_matching(&live, "POST /progress").len(), 3, "progress was sent after the round ended");
     }
 
     #[test]
