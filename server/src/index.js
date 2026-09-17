@@ -135,26 +135,28 @@ async function postClaim(request, env, body) {
 }
 
 /**
- * Submit a round. The score is computed here from the words, never taken from
- * the client, and a word only counts if it is genuinely on that board.
+ * Check a submission and score it against the round's board. Returns either
+ * `{ error }` as a ready Response, or what was scored. The score is computed here
+ * from the words, never taken from the client, and a word only counts if it is
+ * genuinely on that board.
  */
-async function postScore(request, env, body) {
+async function scoreSubmission(request, env, body, phase) {
   const { id, round, words } = body;
-  if (!ID_RE.test(id || "")) return fail(request, env, "bad id");
-  if (!Number.isInteger(round)) return fail(request, env, "bad round");
-  if (!Array.isArray(words)) return fail(request, env, "bad words");
+  if (!ID_RE.test(id || "")) return { error: fail(request, env, "bad id") };
+  if (!Number.isInteger(round)) return { error: fail(request, env, "bad round") };
+  if (!Array.isArray(words)) return { error: fail(request, env, "bad words") };
 
   const now = schedule(env, Date.now() / 1000);
   // A round can only be submitted while it is current: not early, not later.
-  if (round !== now.round) {
-    return fail(request, env, "that round is not current", 409);
+  if (round !== now.round || (phase && now.phase !== phase)) {
+    return { error: fail(request, env, "that round is not current", 409) };
   }
 
   const player = await env.ROUNDS.get(`player:${id}`, "json");
-  if (!player) return fail(request, env, "unknown player, claim a name first", 403);
+  if (!player) return { error: fail(request, env, "unknown player, claim a name first", 403) };
 
   const board = await loadRound(env, round);
-  if (!board) return fail(request, env, "no board for that round", 503);
+  if (!board) return { error: fail(request, env, "no board for that round", 503) };
 
   let score = 0;
   const accepted = [];
@@ -171,8 +173,29 @@ async function postScore(request, env, body) {
       rejected.push(word);
     }
   }
+  return { id, round, player, score, accepted, rejected };
+}
 
-  await leaderboard(env, round).submit(id, player.name, score, accepted.length);
+/**
+ * Report progress while a round is being played: the player is on the round's
+ * leaderboard from the moment they join, and their score keeps pace, so when
+ * the round ends everyone who played is already there. Nothing is banked.
+ */
+async function postProgress(request, env, body) {
+  const result = await scoreSubmission(request, env, body, "play");
+  if (result.error) return result.error;
+  const { id, round, player, score, accepted } = result;
+  await leaderboard(env, round).submit(id, player.name, score, accepted.length, false);
+  return json(request, env, { score, accepted: accepted.length });
+}
+
+/** Hand in a finished round: the final score, and the one that is banked. */
+async function postScore(request, env, body) {
+  const result = await scoreSubmission(request, env, body);
+  if (result.error) return result.error;
+  const { id, round, player, score, accepted, rejected } = result;
+
+  await leaderboard(env, round).submit(id, player.name, score, accepted.length, true);
 
   // Rank is the average of the last ten rounds, same as the client shows. A round
   // with nothing found was not played -- it is on the leaderboard as a zero, but
@@ -217,6 +240,7 @@ export default {
         if (!body) return fail(request, env, "expected JSON");
         if (url.pathname === "/claim") return await postClaim(request, env, body);
         if (url.pathname === "/score") return await postScore(request, env, body);
+        if (url.pathname === "/progress") return await postProgress(request, env, body);
       }
       return fail(request, env, "not found", 404);
     } catch (err) {

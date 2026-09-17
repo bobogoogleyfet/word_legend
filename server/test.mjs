@@ -5,6 +5,13 @@ import { readFileSync } from "node:fs";
 
 const pack = JSON.parse(readFileSync(process.argv[2], "utf8"));
 
+// Pin the clock ten seconds into a round, so tests that depend on the phase run
+// the same whenever they are run.
+const EPOCH_MS = Date.UTC(2026, 0, 1);
+const CYCLE_MS = (180 + 30) * 1000;
+const PINNED_NOW = EPOCH_MS + 40_000 * CYCLE_MS + 10_000;
+Date.now = () => PINNED_NOW;
+
 /** Minimal stand-in for Workers KV. */
 function makeKV(seed = {}) {
   const store = new Map(Object.entries(seed));
@@ -204,6 +211,50 @@ await test("a resubmission replaces the player's row rather than adding one", as
   const table = await body(await call(e, `/leaderboard?round=${roundInfo.round}`));
   assert.equal(table.entries.length, 1);
   assert.equal(table.entries[0].words, realWords.length);
+});
+
+await test("progress puts a player on the table at once, without banking anything", async () => {
+  const e = env();
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID2, name: "latecomer" }) });
+
+  // Both join; one has found a couple of words already.
+  const joined = await call(e, "/progress", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: realWords.slice(0, 2) }) });
+  assert.equal(roundInfo.phase, "play", "the test clock should be mid-round");
+  assert.equal(joined.status, 200);
+  await call(e, "/progress", { method: "POST", body: JSON.stringify({ id: ID2, round: roundInfo.round, words: [] }) });
+
+  let table = await body(await call(e, `/leaderboard?round=${roundInfo.round}`));
+  assert.deepEqual(table.entries.map((r) => [r.name, r.final]).sort(), [["latecomer", false], ["wordfan", false]]);
+  assert.deepEqual((await e.ROUNDS.get(`player:${ID}`, "json")).recent, [], "progress was banked");
+
+  // The final score replaces the progress row and is the one banked.
+  const done = await body(await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: realWords }) }));
+  table = await body(await call(e, `/leaderboard?round=${roundInfo.round}`));
+  const mine = table.entries.find((r) => r.name === "wordfan");
+  assert.equal(mine.final, true);
+  assert.equal(mine.score, done.score);
+  assert.deepEqual((await e.ROUNDS.get(`player:${ID}`, "json")).recent, [done.score]);
+
+  // A slow progress report landing after the final score does not undo it.
+  await call(e, "/progress", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: [] }) });
+  table = await body(await call(e, `/leaderboard?round=${roundInfo.round}`));
+  assert.equal(table.entries.find((r) => r.name === "wordfan").score, done.score, "late progress overwrote a final score");
+});
+
+await test("progress is refused once the round is over", async () => {
+  const e = env();
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  const later = Date.now;
+  Date.now = () => PINNED_NOW + 175_000; // into the results window of the same round
+  try {
+    const r = await call(e, "/progress", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: [] }) });
+    assert.equal(r.status, 409, "progress was taken during results");
+    const done = await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: [] }) });
+    assert.equal(done.status, 200, "the final score must still be taken during results");
+  } finally {
+    Date.now = later;
+  }
 });
 
 await test("a round with nothing found is on the table but not banked", async () => {
