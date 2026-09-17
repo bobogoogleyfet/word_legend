@@ -3,7 +3,7 @@
 use crate::clipboard::Paste;
 use crate::game::{Feedback, Game, Phase, Position, RESULTS_SECONDS, ROUND_SECONDS, SIZE};
 use crate::identity::{self, Identity};
-use crate::league::{GameRecord, Movement, FORM_GAMES, HISTORY_GAMES, LEAGUES, MIN_GAMES_TO_MOVE};
+use crate::league::{GameRecord, Movement, FORM_GAMES, LEAGUES, MIN_GAMES_TO_MOVE};
 use crate::live::{Live, NameStatus, MIN_JOIN_SECONDS};
 use crate::net::{self, Link};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
@@ -1818,20 +1818,15 @@ impl WordLegendApp {
         let x = |i: usize| plot.min.x + (first + i) as f32 * dx;
 
         if axes {
-            let label = |at: f32, text: &str| {
-                painter.text(Pos2::new(at, plot.max.y + 4.0), Align2::CENTER_TOP, text, FontId::proportional(10.0), MUTED);
-            };
-            label(plot.max.x - 14.0, "Newest");
-            let mut ago = 10;
-            while ago < games.len() {
-                let at = x(games.len() - 1 - ago);
-                if at - plot.min.x > 34.0 {
-                    label(at, &format!("-{ago}"));
-                }
-                ago += 10;
-            }
-            if games.len() > 1 {
-                label(x(0) + 12.0, "Oldest");
+            // The games in the window, counted up from the oldest: 1 to 10.
+            for slot in 0..slots {
+                painter.text(
+                    Pos2::new(plot.min.x + slot as f32 * dx, plot.max.y + 4.0),
+                    Align2::CENTER_TOP,
+                    (slot + 1).to_string(),
+                    FontId::proportional(10.0),
+                    MUTED,
+                );
             }
         }
 
@@ -1901,7 +1896,8 @@ impl WordLegendApp {
             });
             ui.add_space(10.0);
 
-            app.stacked(ui, |app, ui| app.history_chart(ui, if narrow { 190.0 } else { 230.0 }, HISTORY_GAMES, true));
+            // The ten games the rank average is taken over, and the average itself.
+            app.stacked(ui, |app, ui| app.history_chart(ui, if narrow { 190.0 } else { 230.0 }, FORM_GAMES, true));
             ui.add_space(14.0);
 
             app.stacked(ui, |_, ui| league_ladder(ui, league, average));
@@ -3153,9 +3149,11 @@ mod tests {
                 assert!(texts.iter().any(|t| t == expected), "stats page at {size:?} is missing {expected:?}: {texts:?}");
             }
             assert_eq!(lines_in(&top, SERIES_SCORES).len(), 1, "no chart on the stats page at {size:?}");
-            for label in ["Newest", "Oldest"] {
-                assert!(texts.iter().any(|t| t == label), "no {label} axis label at {size:?}");
+            // The ten games are numbered 1 to 10 along the bottom.
+            for slot in 1..=FORM_GAMES {
+                assert!(texts.iter().any(|t| *t == slot.to_string()), "no {slot} axis label at {size:?}");
             }
+            assert!(!texts.iter().any(|t| t == "Oldest" || t == "Newest"), "the old axis labels are still there");
             // The leagues and the average each takes, with where the player is.
             for expected in ["Leagues", "Bronze", "Silver", "5,000 avg", "Hero", "50,000 avg", "You are here", "Average reached"] {
                 assert!(texts.iter().any(|t| t == expected), "the league ladder at {size:?} is missing {expected:?}");

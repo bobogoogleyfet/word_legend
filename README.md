@@ -124,8 +124,9 @@ one.
 - The steps widen toward the top. Hero takes a 46,000 average from everything
   but superwords.
 
-The **Stats** page (from the home screen) charts your last fifty games — each
-game's score and the average it left you with — and shows every league with the
+The **Stats** page (from the home screen) charts the ten games your rank is taken
+over — each game's score and the average it left you with, numbered 1 to 10 — and
+shows every league with the
 average it takes, the **all-time leaderboard** (every player by their average,
 with their league, best round and games played), your best game (score, best
 word, most words), all-time averages and totals.
