@@ -66,12 +66,18 @@
       status.innerHTML = '<h1>WORD LEGEND</h1><p>' + message + '</p>';
     }
 
+    // Stamped by build-web.sh with a hash of the bundle. GitHub Pages lets browsers
+    // reuse every file for ten minutes, so without a URL that changes per build a
+    // reload after a deploy keeps running the old game. The page itself is
+    // revalidated on reload; the new stamp then fetches the new bundle.
+    const build = '__BUILD__';
+
     // Imported dynamically, not with a top-level `import`: a static one that 404s
     // takes the whole module down before any of this runs, leaving the loading bar
     // spinning forever with the reason only in the console.
     let wasm;
     try {
-      wasm = await import('./word_legend_app.js');
+      wasm = await import(`./word_legend_app.js?v=${build}`);
     } catch (err) {
       fail(
         'The game bundle failed to load. If this is a GitHub Pages deploy, check ' +
@@ -83,7 +89,7 @@
     }
 
     try {
-      await wasm.default();
+      await wasm.default({ module_or_path: `./word_legend_app_bg.wasm?v=${build}` });
       status.remove();
       await wasm.start(canvas);
     } catch (err) {

@@ -20,12 +20,16 @@ wasm-bindgen --target web --no-typescript \
   --out-dir dist \
   target/wasm32-unknown-unknown/release/word_legend_app.wasm
 
-cp index.html dist/
+# Stamp the page with a hash of the bundle, so each build is fetched under new
+# URLs rather than served from a browser's ten-minute cache of the last one.
+BUILD="$(cat dist/word_legend_app.js dist/word_legend_app_bg.wasm | sha256sum | cut -c1-12)"
+sed "s/__BUILD__/${BUILD}/g" index.html > dist/index.html
+grep -q "__BUILD__" dist/index.html && { echo "index.html was not stamped" >&2; exit 1; }
 # Without this, GitHub Pages runs the output through Jekyll.
 touch dist/.nojekyll
 
 echo
-echo "dist/ built:"
+echo "dist/ built (build ${BUILD}):"
 du -h dist/* | sort -h
 echo
 echo "Serve locally with:  python3 -m http.server -d dist 8080"
