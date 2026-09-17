@@ -3076,7 +3076,7 @@ mod tests {
                 assert!(texts.iter().any(|t| t == label), "no {label} axis label at {size:?}");
             }
             // The leagues and the average each takes, with where the player is.
-            for expected in ["Leagues", "Bronze", "Silver", "4,000 avg", "Hero", "30,000 avg", "You are here", "Average reached"] {
+            for expected in ["Leagues", "Bronze", "Silver", "5,000 avg", "Hero", "50,000 avg", "You are here", "Average reached"] {
                 assert!(texts.iter().any(|t| t == expected), "the league ladder at {size:?} is missing {expected:?}");
             }
         }

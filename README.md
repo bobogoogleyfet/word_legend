@@ -111,18 +111,18 @@ one.
 | League   | Average needed |
 | -------- | -------------- |
 | Bronze   | —              |
-| Silver   | 4,000          |
-| Gold     | 8,000          |
-| Platinum | 13,000         |
-| Diamond  | 20,000         |
-| Hero     | 30,000         |
+| Silver   | 5,000          |
+| Gold     | 12,000         |
+| Platinum | 22,000         |
+| Diamond  | 35,000         |
+| Hero     | 50,000         |
 
 - **Promotion** waits until you have banked five games, then moves you up one
   league whenever your average reaches the next.
 - **Relegation** does not wait: if your average falls below your league's floor,
   you drop back one league.
-- The gaps widen toward the top. Hero takes a 26,000 average from everything but
-  superwords.
+- The steps widen toward the top. Hero takes a 46,000 average from everything
+  but superwords.
 
 The **Stats** page (from the home screen) charts your last fifty games — each
 game's score and the average it left you with — and shows every league with the

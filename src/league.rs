@@ -41,19 +41,19 @@ pub struct LeagueDef {
     pub threshold: u32,
 }
 
-/// Each league asks more than the last, and the gaps widen toward the top, so the
-/// upper leagues are for players who are consistently very good rather than ones
-/// who had a lucky run. Set with superwords at 20,000 every fifth round and the
-/// letter bonus in mind: finding every superword lifts an average by about 4,000,
-/// so Hero still takes 26,000 a round from everything else. Retune with real
+/// Each league asks more than the last, and the steps widen toward the top --
+/// 5,000, then 7,000, 10,000, 13,000 and 15,000 -- so the upper leagues are for
+/// players who are consistently excellent rather than ones who had a lucky run.
+/// Hero is a 50,000 average: finding every superword lifts an average by about
+/// 4,000, so it still takes 46,000 a round from everything else. Retune with real
 /// scores once there are enough of them.
 pub const LEAGUES: [LeagueDef; 6] = [
     LeagueDef { name: "Bronze", threshold: 0 },
-    LeagueDef { name: "Silver", threshold: 4_000 },
-    LeagueDef { name: "Gold", threshold: 8_000 },
-    LeagueDef { name: "Platinum", threshold: 13_000 },
-    LeagueDef { name: "Diamond", threshold: 20_000 },
-    LeagueDef { name: "Hero", threshold: 30_000 },
+    LeagueDef { name: "Silver", threshold: 5_000 },
+    LeagueDef { name: "Gold", threshold: 12_000 },
+    LeagueDef { name: "Platinum", threshold: 22_000 },
+    LeagueDef { name: "Diamond", threshold: 35_000 },
+    LeagueDef { name: "Hero", threshold: 50_000 },
 ];
 
 pub const TOP_LEAGUE: usize = LEAGUES.len() - 1;
@@ -426,7 +426,7 @@ mod tests {
     fn the_leagues_get_harder_toward_the_top() {
         let gaps: Vec<u32> = LEAGUES.windows(2).map(|w| w[1].threshold - w[0].threshold).collect();
         assert!(gaps.windows(2).all(|g| g[1] >= g[0]), "each league should ask at least as much more as the last: {gaps:?}");
-        assert!(LEAGUES[TOP_LEAGUE].threshold >= 30_000, "the top league should be hard to reach");
+        assert_eq!(LEAGUES[TOP_LEAGUE].threshold, 50_000, "Hero is a 50,000 average");
     }
 
     #[test]
@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn a_single_bad_round_does_not_cost_a_league() {
         // Comfortably in Gold on average, then one disaster.
-        let mut r = ranked(2, &[10_000; 9]);
+        let mut r = ranked(2, &[15_000; 9]);
         let change = r.record(0);
         assert_eq!(change.movement, Movement::Held);
         assert_eq!(r.league, 2);
@@ -486,13 +486,11 @@ mod tests {
     #[test]
     fn a_sustained_run_promotes() {
         let mut r = Ranking::new();
-        let mut change = r.record(9_000);
-        for _ in 0..5 {
-            change = r.record(9_000);
-        }
-        // 9000 clears Silver (4000) and Gold (8000) but not Platinum (13000).
-        assert_eq!(change.movement, Movement::Promoted);
-        assert!(r.league >= 1);
+        let moves: Vec<Movement> = (0..6).map(|_| r.record(9_000).movement).collect();
+        // 9000 clears Silver (5000) but not Gold (12000): promoted once, on the
+        // fifth round, when the ladder first starts judging.
+        assert_eq!(moves, [Movement::Held, Movement::Held, Movement::Held, Movement::Held, Movement::Promoted, Movement::Held]);
+        assert_eq!(r.league, 1);
         assert!(LEAGUES[r.league].threshold <= 9_000);
     }
 
