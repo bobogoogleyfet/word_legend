@@ -1,8 +1,23 @@
 # Word Legend server
 
-A Cloudflare Worker with a KV namespace and a Durable Object. It runs the shared
-clock, owns display names, checks submitted scores and keeps each round's
-leaderboard.
+A Cloudflare Worker with a KV namespace and two Durable Object classes. It runs
+the shared clock, owns display names, checks submitted scores, banks players'
+scores and keeps each round's leaderboard.
+
+## Where data is stored
+
+| Where | What | Written |
+| --- | --- | --- |
+| KV namespace `ROUNDS` — `pack:N`, `pack:mMM:N` | the round packs: boards and their valid words | on upload |
+| KV `ROUNDS` — `name:<name>` | which account owns a display name | when a name is claimed or changed |
+| KV `ROUNDS` — `player:<id>` | an account's display name | when a name is claimed or changed |
+| Durable Object `Player`, one per account | the last ten banked scores | each scored round |
+| Durable Object `Leaderboard`, one per round | that round's table: names, scores, leagues | progress and final scores |
+
+In the Cloudflare dashboard: **Storage & Databases → KV** for the namespace, and
+**Workers & Pages → word-legend → Durable Objects** for the objects. No files,
+recovery codes or personal details are stored: an account is a random id and a
+chosen name.
 
 ## Credentials
 
@@ -45,8 +60,8 @@ packs, but an older Worker cannot score newer ones correctly.
 npx wrangler kv namespace create ROUNDS   # prints an id: put it in wrangler.toml
 ```
 
-The `Leaderboard` Durable Object is declared in `wrangler.toml` and created by the
-first deploy.
+The `Leaderboard` and `Player` Durable Objects are declared in `wrangler.toml`
+and created by the first deploy.
 
 ## Rounds
 
@@ -99,7 +114,7 @@ A player is put on the table as soon as they join a round, by progress reports
 not final, never banked, taken only while the round is being played, and never
 overwrites a final score. So when a round ends, everyone who played is already
 there; their final score (`/score`) replaces the row. An alarm clears a round's
-table a week after its last score.
+table a week after its first score.
 
 A round with nothing found is filed with 0 but not added to the player's average.
 
@@ -118,7 +133,7 @@ other. A player's league on the leaderboard is as their game reports it.
 | `GET /round` | the current round, its phase (`play` or `results`), seconds left, and its board |
 | `POST /claim` | `{id, name}` — take a display name |
 | `POST /progress` | `{id, round, words[], paths[], league}` — progress while playing; nothing banked |
-| `POST /score` | `{id, round, words[], paths[], league}` — the final score, scored and banked here |
+| `POST /score` | `{id, round, words[], paths[], league}` — the final score, scored and banked in the player's Durable Object |
 | `GET /leaderboard?round=` | names, scores, word counts, leagues and whether each is final |
 
 The board's word list is never sent to clients: they work it out themselves, and
@@ -132,14 +147,32 @@ cd server && npm test
 ```
 
 The tests run under plain Node, with a stand-in for `cloudflare:workers` and an
-in-memory namespace for the Durable Object, and the clock pinned mid-round. They
+in-memory namespace for the Durable Objects, and the clock pinned mid-round. They
 cover names, forged and invented scores, the obscure and superword bonuses, the
 letter bonus against valid and invalid paths, simultaneous submissions,
-progress, the monthly packs and the leaderboard's leagues.
+progress and its throttling, the monthly packs, the leaderboard's leagues, and
+that a scored round costs no KV write.
 
-## Free tier
+## Cost, and staying free
 
-Workers allows 100,000 requests a day and KV 1,000 writes. A banked round costs
-one KV write (the player's recent scores); leaderboard rows go to the Durable
-Object instead. **Uploading every pack costs 130 KV writes**, so a full upload is
-fine once or twice a day, but not in a loop.
+On the **Workers Free plan** the limits are hard: once a daily allowance is used
+up, further requests fail until the day resets, and nothing is ever billed. The
+Paid plan has no spending cap, only usage notifications, so stay on Free unless
+you mean to pay. Check the plan under **Workers & Pages → Plans**.
+
+The game is built to stay well inside the free allowances:
+
+- **Clients ask rarely.** The clock is read about every two minutes and carried
+  forward locally; a new board is fetched once when a round starts, and only by
+  players waiting to play. Progress is reported on joining and then at most once a
+  minute. The table is read four times over a scorecard.
+- **The Worker saves work.** Packs are cached in memory for ten minutes rather than
+  read from KV on every request, and repeated table reads within a second and a
+  half are answered from memory.
+- **Writes are few.** A scored round writes to the player's Durable Object, not
+  KV; KV is written only when a name is claimed or changed. The leaderboard skips
+  progress that changes nothing or arrives within eight seconds of the last.
+
+Roughly, one player-hour costs about 200 requests, so the 100,000-request daily
+allowance covers several hundred player-hours. **Uploading every pack costs 130 KV
+writes** of the free 1,000 a day: fine once or twice a day, not in a loop.

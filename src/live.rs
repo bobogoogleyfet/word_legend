@@ -14,28 +14,28 @@ use crate::identity::Identity;
 use crate::net::{self, Claim, Client, Leaderboard, Link};
 
 const CYCLE: f32 = ROUND_SECONDS + RESULTS_SECONDS;
-/// How often to re-read the clock while all is well. The clock is projected
-/// forward between reads, so this only has to catch drift and a sleeping tab.
-const POLL_ONLINE: f64 = 30.0;
+/// How often to re-read the clock while all is well. The clock runs on from one
+/// reading, so this only catches drift and a tab that slept; each request counts
+/// against the server's daily allowance.
+const POLL_ONLINE: f64 = 120.0;
 /// Retry cadence while the server is not answering.
-const POLL_DOWN: f64 = 15.0;
+const POLL_DOWN: f64 = 30.0;
 /// Minimum gap between reads made because a new board is needed right now.
-const POLL_URGENT: f64 = 2.0;
+const POLL_URGENT: f64 = 3.0;
 /// How long to wait for a first answer before giving up and playing solo. Phones
 /// on a slow connection can take several seconds; giving up too soon drops a
 /// player into a solo board while everyone else is on the shared one.
 const CONNECT_GRACE: f64 = 10.0;
-/// Scorecard refresh while final scores are still landing, just after a round.
-const LEADERBOARD_EVERY_EARLY: f64 = 2.0;
-/// How long after handing in to keep refreshing at the early rate.
-const LEADERBOARD_EARLY_FOR: f64 = 12.0;
-/// Scorecard refresh after that, for stragglers.
-const LEADERBOARD_EVERY: f64 = 5.0;
-/// First table read after handing in. Everyone who played is already on the
-/// table from their progress, so there is no need to wait long.
-const LEADERBOARD_FIRST: f64 = 0.5;
+/// When to read the table after handing in, in seconds: soon, while final scores
+/// land, then twice more for stragglers, and no more -- the scorecard is only open
+/// for thirty seconds, and every read is a request. Everyone who played is already
+/// on the table from their progress, so the first read is nearly complete.
+const LEADERBOARD_READS: [f64; 4] = [1.0, 4.0, 10.0, 20.0];
 /// How often progress is reported while a round is played, when there is news.
-const PROGRESS_EVERY: f64 = 4.0;
+/// Joining reports straight away, which is what puts a player on the table; after
+/// that, progress only keeps a player's score roughly current in case their final
+/// one never arrives.
+const PROGRESS_EVERY: f64 = 60.0;
 /// Joining a round with less than this left is not worth it; wait for the next.
 pub const MIN_JOIN_SECONDS: f32 = 15.0;
 
@@ -85,7 +85,8 @@ pub struct Live {
     submitted: Option<u64>,
     /// When the words were handed in.
     submitted_at: f64,
-    next_leaderboard: f64,
+    /// How many of `LEADERBOARD_READS` have been made for that round.
+    leaderboard_reads: usize,
     /// The round progress is being reported for, when it was last sent, and how
     /// many words that report held.
     progress: Option<(u64, f64, usize)>,
@@ -109,7 +110,7 @@ impl Live {
             last_claim: None,
             submitted: None,
             submitted_at: 0.0,
-            next_leaderboard: 0.0,
+            leaderboard_reads: 0,
             progress: None,
         }
     }
@@ -153,6 +154,7 @@ impl Live {
                 self.client.submit(&me.id, round, &game.found_words(), &game.found_paths(), game.ranking.league);
                 self.submitted = Some(round);
                 self.submitted_at = now;
+                self.leaderboard_reads = LEADERBOARD_READS.len();
             }
         }
         game.leave_round();
@@ -273,7 +275,9 @@ impl Live {
             None => true,
             Some(c) => c.playing && self.board.as_ref().is_none_or(|(r, _)| *r != c.round),
         };
-        let waiting = game.phase != Phase::Playing && (self.joined || game.phase == Phase::Ready);
+        // Only a player waiting to play needs the new board at once; someone idling on
+        // the home screen gets it with the next routine read.
+        let waiting = game.phase != Phase::Playing && self.joined;
         let gap = match self.link {
             Link::Down(_) => POLL_DOWN,
             _ if stale && waiting => POLL_URGENT,
@@ -345,6 +349,7 @@ impl Live {
                 self.client.submit(&me.id, round, &game.found_words(), &game.found_paths(), game.ranking.league);
                 self.submitted = Some(round);
                 self.submitted_at = now;
+                self.leaderboard_reads = LEADERBOARD_READS.len();
             }
         }
     }
@@ -443,12 +448,13 @@ impl Live {
             self.client.submit(&me.id, round, &game.found_words(), &game.found_paths(), game.ranking.league);
             self.submitted = Some(round);
             self.submitted_at = now;
-            self.next_leaderboard = now + LEADERBOARD_FIRST;
+            self.leaderboard_reads = 0;
         }
-        if self.submitted == Some(round) && now >= self.next_leaderboard {
+        if self.submitted == Some(round)
+            && LEADERBOARD_READS.get(self.leaderboard_reads).is_some_and(|at| now - self.submitted_at >= *at)
+        {
             self.client.poll_leaderboard(round);
-            let early = now - self.submitted_at < LEADERBOARD_EARLY_FOR;
-            self.next_leaderboard = now + if early { LEADERBOARD_EVERY_EARLY } else { LEADERBOARD_EVERY };
+            self.leaderboard_reads += 1;
         }
     }
 }
@@ -647,7 +653,7 @@ mod tests {
     fn a_player_is_on_the_table_from_joining_and_it_is_read_straight_after_the_round() {
         let mut game = Game::new();
         let mut live = online();
-        serve(&live, 40, "play", 100.0, 0.0);
+        serve(&live, 40, "play", 150.0, 0.0);
         live.update(&mut game, Some(&me()), 0.0);
         accept_name(&live);
         live.update(&mut game, Some(&me()), 0.1);
@@ -659,33 +665,45 @@ mod tests {
         assert_eq!(reports.len(), 1, "joining should report straight away: {reports:?}");
         assert!(reports[0].contains("\"round\":40") && reports[0].contains("\"words\":[]"));
 
-        // Nothing new, nothing sent; a new word is sent, but not more than every few seconds.
-        live.update(&mut game, Some(&me()), 10.0);
-        assert_eq!(sent_matching(&live, "POST /progress").len(), 1, "reported with no news");
+        // New words are reported, but no more than once a minute.
         for col in 0..4 {
             game.extend_path(crate::game::Position { row: 0, col });
         }
         game.submit_path();
-        live.update(&mut game, Some(&me()), 10.5);
-        assert_eq!(sent_matching(&live, "POST /progress").len(), 2, "a new word was not reported");
-        game.found.push(crate::game::FoundWord { word: "mace".into(), points: 400, path: Vec::new() });
-        live.update(&mut game, Some(&me()), 11.0);
-        assert_eq!(sent_matching(&live, "POST /progress").len(), 2, "reported again within seconds");
-        live.update(&mut game, Some(&me()), 15.0);
-        assert_eq!(sent_matching(&live, "POST /progress").len(), 3);
+        live.update(&mut game, Some(&me()), 30.0);
+        assert_eq!(sent_matching(&live, "POST /progress").len(), 1, "reported again within the minute");
+        live.update(&mut game, Some(&me()), 61.0);
+        assert_eq!(sent_matching(&live, "POST /progress").len(), 2, "a new word was not reported after a minute");
+        live.update(&mut game, Some(&me()), 125.0);
+        assert_eq!(sent_matching(&live, "POST /progress").len(), 2, "reported with nothing new");
 
-        // The round ends: the final score goes in, and the table is read within a
-        // second, then every couple of seconds while scores land.
-        live.update(&mut game, Some(&me()), 100.5);
+        // The round ends: the final score goes in, and the table is read four times
+        // over the scorecard, then not again.
+        live.update(&mut game, Some(&me()), 150.5);
         assert_eq!(game.phase, Phase::Over);
         assert_eq!(sent_matching(&live, "POST /score").len(), 1);
-        live.update(&mut game, Some(&me()), 101.0);
-        assert_eq!(sent_matching(&live, "GET /leaderboard").len(), 1, "the table was not read straight after the round");
-        live.update(&mut game, Some(&me()), 102.0);
-        assert_eq!(sent_matching(&live, "GET /leaderboard").len(), 1);
-        live.update(&mut game, Some(&me()), 103.1);
-        assert_eq!(sent_matching(&live, "GET /leaderboard").len(), 2);
-        assert_eq!(sent_matching(&live, "POST /progress").len(), 3, "progress was sent after the round ended");
+        let reads = |live: &Live| sent_matching(live, "GET /leaderboard").len();
+        let mut seen = Vec::new();
+        for t in [151.0, 151.6, 154.6, 160.6, 170.6, 175.0, 179.0] {
+            live.update(&mut game, Some(&me()), t);
+            seen.push(reads(&live));
+        }
+        assert_eq!(seen, [0, 1, 2, 3, 4, 4, 4], "leaderboard reads over the scorecard");
+        assert_eq!(sent_matching(&live, "POST /progress").len(), 2, "progress was sent after the round ended");
+    }
+
+    #[test]
+    fn a_player_idling_on_the_home_screen_is_not_polled_urgently() {
+        let mut game = Game::new();
+        let mut live = online();
+        serve(&live, 40, "play", 5.0, 0.0);
+        live.update(&mut game, Some(&me()), 0.0);
+        // Round 41 starts while the player sits on the home screen, not joined.
+        let before = sent_matching(&live, "GET /round").len();
+        for t in [40.0, 43.0, 46.0, 49.0, 60.0] {
+            live.update(&mut game, Some(&me()), t);
+        }
+        assert_eq!(sent_matching(&live, "GET /round").len(), before, "an idle player's game kept asking for boards");
     }
 
     #[test]

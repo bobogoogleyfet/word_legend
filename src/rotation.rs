@@ -80,14 +80,23 @@ const SUPERWORD_LAYOUTS: usize = 150;
 
 const EMBEDDED_SUPERWORDS: &str = include_str!("../superwords.txt");
 
-/// The curated superwords, in file order.
-pub fn superwords() -> Vec<String> {
+/// The curated superwords' lines: each a word and its theme.
+fn superword_lines() -> impl Iterator<Item = (&'static str, &'static str)> {
     EMBEDDED_SUPERWORDS
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(str::to_ascii_lowercase)
-        .collect()
+        .map(|l| l.split_once(char::is_whitespace).map(|(w, t)| (w, t.trim())).unwrap_or((l, "")))
+}
+
+/// The curated superwords, in file order.
+pub fn superwords() -> Vec<String> {
+    superword_lines().map(|(w, _)| w.to_ascii_lowercase()).collect()
+}
+
+/// The theme shown for a board built around a superword.
+pub fn superword_theme(word: &str) -> Option<&'static str> {
+    superword_lines().find(|(w, _)| w.eq_ignore_ascii_case(word)).map(|(_, t)| t).filter(|t| !t.is_empty())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -441,6 +450,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_superword_has_a_theme() {
+        for word in superwords() {
+            let theme = superword_theme(&word).unwrap_or_else(|| panic!("{word} has no theme"));
+            assert!(theme.chars().next().is_some_and(char::is_uppercase), "{word}'s theme {theme:?} is not a name");
+        }
+        assert_eq!(superword_theme("CHARACTERIZATION"), Some("Language"));
+        assert_eq!(superword_theme("notaword"), None);
+    }
+
+    #[test]
     fn every_superword_fills_the_board_and_is_a_common_word() {
         let dict = Dictionary::new();
         let words = superwords();
@@ -473,7 +492,7 @@ mod tests {
         let supers: Vec<bool> = (0..10)
             .map(|_| {
                 let (_, words, _) = solo.next_board(&dict, &mut rng);
-                words.common.iter().any(|w| word_tiles(w).is_some_and(|t| t.len() == SIZE * SIZE))
+                words.common.iter().chain(words.obscure.iter()).any(|w| word_tiles(w).is_some_and(|t| t.len() == SIZE * SIZE))
             })
             .collect();
         assert_eq!(supers, [false, false, false, false, true, false, false, false, false, true]);

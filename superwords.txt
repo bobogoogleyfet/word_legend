@@ -2,135 +2,249 @@
 #
 # Each fills a board on its own: sixteen tiles, one letter each, with "qu" sharing
 # a tile. A superword board is laid out along the word, so every letter on it
-# belongs to the word. One round in ten is built around one of these.
+# belongs to the word. Every fifth round is built around one of these.
 #
-# Curated from the common word list: no British variant where the American one is
-# here, and one form per word (CIRCUMNAVIGATION, not also CIRCUMNAVIGATING), so
-# the rotation does not serve the same word twice in all but name.
+# Each line is the word and the theme shown under a board built around it.
+#
+# Curated for words players will recognise: no British variant where the
+# American one is here, one form per word (CIRCUMNAVIGATION, not also
+# CIRCUMNAVIGATING), and nothing crude.
 
-acknowledgements
-administratively
-agriculturalists
-anesthesiologist
-antagonistically
-anthropomorphism
-apprehensiveness
-aristocratically
-arteriosclerosis
-authoritarianism
-autobiographical
-bloodthirstiness
-bureaucratically
-cantankerousness
-catastrophically
-characterization
-cinematographers
-circumnavigation
-circumscriptions
-circumstantially
-compartmentalize
-conservationists
-constitutionally
-conversationally
-counterattacking
-counterbalancing
-counterclockwise
-counterespionage
-crystallographic
-decentralization
-demilitarization
-departmentalized
-discombobulating
-discontinuations
-discountenancing
-disenfranchising
-disproportionate
-electromagnetism
-enthusiastically
-environmentalist
-excommunications
-exemplifications
-extemporaneously
-extraterrestrial
-flibbertigibbets
-gastrointestinal
-hospitalizations
-hydroelectricity
-hypersensitivity
-hyperventilation
-imperturbability
-implausibilities
-incomprehensible
-incontrovertible
-incorruptibility
-indemnifications
-indiscriminately
-inextinguishable
-institutionalize
-instrumentalists
-insurrectionists
-intellectualized
-interconnections
-intercontinental
-internationalize
-irresponsibility
-lightheartedness
-melodramatically
-misapprehensions
-misappropriation
-miscommunication
-misconstructions
-mispronunciation
-misunderstanding
-multiculturalism
-multidimensional
-multifariousness
-multimillionaire
-nanotechnologies
-nationalizations
-neoconservatives
-neurotransmitter
-nonprofessionals
-nonproliferation
-ophthalmologists
-overcompensation
-overenthusiastic
-overspecializing
-paraprofessional
-parliamentarians
-personifications
-photographically
-photojournalists
-phototypesetting
-physiotherapists
-praiseworthiness
-predetermination
-presumptuousness
-prognostications
-psychotherapists
-rambunctiousness
-rationalizations
-reinterpretation
-representational
-responsibilities
-schoolmistresses
-semiprofessional
-sentimentalizing
-shortsightedness
-straightjacketed
-synchronizations
-teleconferencing
-tintinnabulation
-transcendentally
-transcontinental
-transliterations
-uncharacteristic
-uncompromisingly
-unconstitutional
-unconventionally
-undersecretaries
-unpredictability
-unreasonableness
-unrepresentative
-unscrupulousness
-whatchamacallits
+absentmindedness Character
+acknowledgements Language
+administratively Business
+agriculturalists Nature
+anesthesiologist Medicine
+antagonistically Character
+anthropomorphism Language
+antihypertensive Medicine
+apprehensiveness Feelings
+archaeologically Science
+aristocratically Society
+arteriosclerosis Medicine
+astrophotography Space
+asymptomatically Medicine
+authoritarianism Politics
+autobiographical Language
+biodegradability Nature
+biotechnological Technology
+bloodthirstiness Character
+bronchopneumonia Medicine
+bureaucratically Politics
+cantankerousness Character
+catastrophically Everyday
+characterization Language
+chemotherapeutic Medicine
+cinematographers Arts
+circumnavigation Travel
+circumscriptions Language
+circumstantially Law
+collaborationist Politics
+compartmentalize Mind
+conservationists Nature
+constitutionally Law
+containerization Business
+contemptuousness Character
+contraindication Medicine
+conversationally Language
+counterarguments Mind
+counterattacking Military
+counterbalancing Science
+counterclockwise Everyday
+counterespionage Military
+counterintuitive Mind
+counteroffensive Military
+counterproposals Business
+creditworthiness Business
+crosspollination Nature
+cryptocurrencies Technology
+crystallographic Science
+curmudgeonliness Character
+decentralization Politics
+declassification Politics
+dehumidification Everyday
+demilitarization Military
+dendrochronology Science
+departmentalized Business
+depressurization Science
+dessertspoonfuls Everyday
+discombobulating Feelings
+disconnectedness Feelings
+discontinuations Business
+discountenancing Character
+disenfranchising Politics
+disestablishment Politics
+disingenuousness Character
+disproportionate Math
+electrochemistry Science
+electromagnetism Science
+encyclopedically Language
+enthusiastically Feelings
+entrepreneurship Business
+environmentalist Nature
+excommunications Religion
+exemplifications Language
+extemporaneously Language
+extraterrestrial Space
+extraterritorial Law
+flibbertigibbets Character
+gastroenterology Medicine
+gastrointestinal Medicine
+geosynchronously Space
+heliocentrically Space
+horticulturalist Nature
+hospitalizations Medicine
+hydroelectricity Technology
+hypersensitivity Medicine
+hyperventilation Medicine
+immunodeficiency Medicine
+imperturbability Character
+implausibilities Mind
+inarticulateness Language
+inauspiciousness Feelings
+incomprehensible Mind
+inconclusiveness Mind
+incontrovertible Law
+incorruptibility Character
+indefatigability Character
+indemnifications Law
+indiscriminately Mind
+indispensability Everyday
+inextinguishable Everyday
+inhospitableness Character
+institutionalize Society
+instrumentalists Music
+insurrectionists Politics
+intellectualized Mind
+intercommunicate Language
+interconnections Technology
+intercontinental Travel
+interdependently Society
+internationalize Politics
+interoperability Technology
+interrelatedness Mind
+irrepressibility Character
+irresponsibility Character
+laparoscopically Medicine
+lightheartedness Feelings
+machiavellianism Politics
+melodramatically Arts
+meteorologically Science
+methodologically Science
+microelectronics Technology
+misapprehensions Mind
+misappropriation Law
+miscommunication Language
+misconstructions Language
+mispronunciation Language
+misunderstanding Language
+multiculturalism Society
+multidimensional Math
+multidirectional Math
+multifariousness Mind
+multimillionaire Business
+nanotechnologies Technology
+narcissistically Character
+nationalizations Politics
+neoconservatives Politics
+neurotransmitter Medicine
+noncommunicative Language
+noncontroversial Politics
+nondeterministic Math
+nonprofessionals Business
+nonproliferation Military
+obstreperousness Character
+onomatopoeically Language
+ophthalmologists Medicine
+ornithologically Nature
+ostentatiousness Character
+otherworldliness Religion
+otolaryngologist Medicine
+overachievements School
+overcompensation Mind
+overenthusiastic Feelings
+overspecializing Business
+paleoclimatology Science
+paraprofessional Business
+parapsychologist Mind
+parliamentarians Politics
+perpendicularity Math
+personifications Language
+phantasmagorical Arts
+photographically Arts
+photojournalists Arts
+photolithography Technology
+photosensitivity Science
+photosynthesizes Nature
+phototypesetting Technology
+physiotherapists Medicine
+piezoelectricity Science
+praiseworthiness Character
+predetermination Mind
+prekindergartens School
+preposterousness Character
+prerevolutionary History
+prestidigitation Arts
+presumptuousness Character
+procrastinations Everyday
+prognostications Mind
+psychoanalytical Mind
+psycholinguistic Language
+psychotherapists Medicine
+rambunctiousness Character
+rationalizations Mind
+recapitalization Business
+reconfigurations Technology
+reinterpretation Mind
+representational Arts
+responsibilities Everyday
+schoolmistresses School
+semipermeability Science
+semiprofessional Business
+sensationalistic Arts
+sentimentalizing Feelings
+shortsightedness Character
+sociolinguistics Language
+sphygmomanometer Medicine
+straightjacketed Everyday
+subconsciousness Mind
+superciliousness Character
+superdreadnought Military
+surrealistically Arts
+synchronizations Technology
+teleconferencing Technology
+thermodynamicist Science
+thermostatically Everyday
+thrombophlebitis Medicine
+tintinnabulation Music
+transcendentally Religion
+transcontinental Travel
+transcriptionist Business
+transliterations Language
+ultranationalism Politics
+unaccountability Politics
+unattractiveness Character
+uncharacteristic Character
+uncharitableness Character
+uncompromisingly Character
+unconstitutional Law
+unconventionally Character
+undemocratically Politics
+underachievement School
+underappreciated Feelings
+underdevelopment Society
+undernourishment Society
+underrepresented Politics
+undersecretaries Politics
+unpredictability Mind
+unprofessionally Business
+unreasonableness Character
+unrepresentative Politics
+unresponsiveness Character
+unsatisfactorily School
+unscientifically Science
+unscrupulousness Character
+vasoconstriction Medicine
+weatherstripping Everyday
+whatchamacallits Everyday
+wholeheartedness Feelings

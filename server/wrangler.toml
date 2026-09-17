@@ -31,6 +31,16 @@ class_name = "Leaderboard"
 tag = "v1"
 new_sqlite_classes = ["Leaderboard"]
 
+# One Durable Object per player holds their banked scores, so a scored round does
+# not cost a KV write (the free plan allows a thousand a day).
+[[durable_objects.bindings]]
+name = "PLAYER"
+class_name = "Player"
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Player"]
+
 [vars]
 # Public knobs only. Secrets never appear here.
 ROUND_SECONDS = "180"

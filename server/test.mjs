@@ -1,5 +1,5 @@
 // Worker tests. Run with: node test.mjs
-import worker, { Leaderboard } from "./src/index.js";
+import worker, { Leaderboard, Player } from "./src/index.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
@@ -45,7 +45,8 @@ function makeNamespace(Class) {
             return new Map([...store].filter(([k]) => k.startsWith(prefix)).sort(([a], [b]) => a.localeCompare(b)));
           },
           async deleteAll() { store.clear(); },
-          async setAlarm() {},
+          async setAlarm(at) { store.set("__alarm", at); },
+          async getAlarm() { return store.get("__alarm") ?? null; },
         };
         instances.set(name, new Class({ storage }, {}));
       }
@@ -61,6 +62,7 @@ const ORIGIN = "https://bobogoogleyfet.github.io";
 const env = () => ({
   ROUNDS: makeKV({ "pack:0": JSON.stringify(pack) }),
   LEADERBOARD: makeNamespace(Leaderboard),
+  PLAYER: makeNamespace(Player),
   ROUND_SECONDS: "180", RESULTS_SECONDS: "30",
   PACK_COUNT: "1", PACK_SIZE: String(pack.length),
   ALLOWED_ORIGINS: ORIGIN,
@@ -306,7 +308,7 @@ await test("progress puts a player on the table at once, without banking anythin
 
   let table = await body(await call(e, `/leaderboard?round=${roundInfo.round}`));
   assert.deepEqual(table.entries.map((r) => [r.name, r.final]).sort(), [["latecomer", false], ["wordfan", false]]);
-  assert.deepEqual((await e.ROUNDS.get(`player:${ID}`, "json")).recent, [], "progress was banked");
+  assert.deepEqual(await e.PLAYER.getByName(`player:${ID}`).recent(), [], "progress was banked");
 
   // The final score replaces the progress row and is the one banked.
   const done = await body(await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: realWords }) }));
@@ -314,7 +316,7 @@ await test("progress puts a player on the table at once, without banking anythin
   const mine = table.entries.find((r) => r.name === "wordfan");
   assert.equal(mine.final, true);
   assert.equal(mine.score, done.score);
-  assert.deepEqual((await e.ROUNDS.get(`player:${ID}`, "json")).recent, [done.score]);
+  assert.deepEqual(await e.PLAYER.getByName(`player:${ID}`).recent(), [done.score]);
 
   // A slow progress report landing after the final score does not undo it.
   await call(e, "/progress", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: [] }) });
@@ -346,7 +348,7 @@ await test("a round with nothing found is on the table but not banked", async ()
   const idle = await body(await call(e2, "/score", { method: "POST", body: JSON.stringify({ id: ID2, round: roundInfo.round, words: [] }) }));
   assert.equal(idle.score, 0);
   assert.equal(idle.average, 0);
-  assert.deepEqual((await e2.ROUNDS.get(`player:${ID2}`, "json")).recent, [], "a zero was banked");
+  assert.deepEqual(await e2.PLAYER.getByName(`player:${ID2}`).recent(), [], "a zero was banked");
   const table = await body(await call(e2, `/leaderboard?round=${roundInfo.round}`));
   assert.deepEqual(table.entries.map((r) => [r.name, r.score]), [["idler", 0]], "the idle player is missing from the table");
   assert.ok(played.score > 0);
@@ -356,9 +358,53 @@ await test("rank is the average of the last ten rounds", async () => {
   const e = env();
   await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
   const res = await body(await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: realWords }) }));
-  const player = await e.ROUNDS.get(`player:${ID}`, "json");
-  assert.deepEqual(player.recent, [res.score]);
+  assert.deepEqual(await e.PLAYER.getByName(`player:${ID}`).recent(), [res.score]);
   assert.equal(res.average, res.score);
+});
+
+await test("a scored round costs no KV write, and claiming the same name again costs none", async () => {
+  const e = env();
+  let writes = 0;
+  const put = e.ROUNDS.put.bind(e.ROUNDS);
+  e.ROUNDS.put = async (...args) => { writes += 1; return put(...args); };
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  const afterClaim = writes;
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  assert.equal(writes, afterClaim, "re-claiming the same name wrote to KV");
+  await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: realWords }) });
+  assert.equal(writes, afterClaim, "a scored round wrote to KV");
+});
+
+await test("scores a player had in KV carry into their Player object", async () => {
+  const e = env();
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  await e.ROUNDS.put(`player:${ID}`, JSON.stringify({ name: "wordfan", recent: [1000, 3000] }));
+  const res = await body(await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: realWords }) }));
+  assert.deepEqual(await e.PLAYER.getByName(`player:${ID}`).recent(), [1000, 3000, res.score]);
+  assert.equal(res.average, Math.round((1000 + 3000 + res.score) / 3));
+});
+
+await test("progress that changes nothing, or comes too fast, is not written", async () => {
+  const e = env();
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  const board = e.LEADERBOARD.getByName(`round:${roundInfo.round}`);
+  const realNow = Date.now;
+  let clock = realNow();
+  Date.now = () => clock;
+  try {
+    const progress = (words) => call(e, "/progress", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words }) });
+    await progress([]);
+    const first = await board.table();
+    assert.equal(first.length, 1);
+    clock += 2000;
+    await progress(realWords); // too soon after the last
+    assert.equal((await board.table())[0].words, 0, "progress two seconds later was written");
+    clock += 10000;
+    await progress(realWords);
+    assert.equal((await board.table())[0].words, realWords.length, "progress after the gap was not written");
+  } finally {
+    Date.now = realNow;
+  }
 });
 
 await test("unknown routes 404", async () => {

@@ -15,7 +15,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const MIN_WORD_LEN: usize = 3;
-pub const MAX_WORD_LEN: usize = 16;
+/// Seventeen, not sixteen: a word with QU fits seventeen letters on sixteen tiles.
+pub const MAX_WORD_LEN: usize = 17;
 
 /// Shipped word lists, so the game runs from any working directory.
 const EMBEDDED_ACCEPTED: &str = include_str!("../dictionary.txt");

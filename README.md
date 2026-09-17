@@ -83,7 +83,8 @@ for thirty rounds and then turns up twice in a row:
 
 - **Every fifth round is a superword board**, built around a sixteen-letter word
   laid out across every tile — CHARACTERIZATION, MISUNDERSTANDING,
-  WHATCHAMACALLITS. Find it for 20,000.
+  WHATCHAMACALLITS — from a curated list of 238, each with a theme shown under
+  the board ("Superword board · Theme: Medicine"). Find it for 20,000.
 - **The other four are themed.** A themed board holds **at least twenty words
   from its theme**, plurals included — Animals, Food, Nature, Body, Music,
   Science, Math, History, Verbs and Adjectives rotate evenly, never back to back.
@@ -186,11 +187,13 @@ play, so everyone in the round is already on the table when it ends. Each round'
 table lives in its own Durable Object, which keeps simultaneous submissions from
 overwriting each other.
 
-**The dictionary has two tiers.** The lexicon is ENABLE — 172,823 words, public
-domain — so every word the game accepts is a real, playable one. About 63,000
-everyday words form the **Common** tier that boards are built from and judged
-against; the rest are **Obscure**: accepted, and worth 10% more, but never held
-against you on a scorecard.
+**The dictionary has two tiers.** The game accepts 434,639 words: ENABLE (public
+domain) together with SCOWL at its largest size, 95 — the biggest freely usable
+English word list, rare and archaic words included. The Oxford English Dictionary
+is not free to use or copy, so it cannot be included. About 63,000 everyday words
+form the **Common** tier that boards are built from and judged against; the rest
+are **Obscure**: accepted, and worth 10% more, but never held against you on a
+scorecard. See [`licenses/`](licenses/) for the word lists' notices.
 
 ## Layout
 
@@ -208,7 +211,8 @@ against you on a scorecard.
 | `src/export.rs`, `src/bin/export_rounds.rs` | Building round packs for the server |
 | `src/clipboard.rs` | Reading the clipboard for the recovery code's Paste button |
 | `src/storage.rs` | Saves: a dotfile on desktop, `localStorage` on the web |
-| `themes.txt`, `superwords.txt` | The theme lists and the curated superwords |
+| `themes.txt`, `superwords.txt` | The theme lists, and the curated superwords with their themes |
+| `dictionary.txt`, `common.txt`, `licenses/` | Every accepted word, the everyday tier, and the word lists' licences |
 | `server/` | The Cloudflare Worker |
 | `vendor/egui_glow` | egui's renderer with its shaders at high precision — see below |
 
@@ -236,6 +240,6 @@ longer uses medium precision.
 it on every push to `main`. The repository must be public (unless on a paid plan),
 and **Settings → Pages → Source** must be **GitHub Actions**.
 
-The bundle is ~7 MB, **~2.3 MB gzipped** — what actually crosses the wire, since
-Pages compresses it — because both word lists are compiled in. The page shows a
+The bundle is ~10 MB, **~3.1 MB gzipped** — what actually crosses the wire, since
+Pages compresses it — because the word lists are compiled in. The page shows a
 loading bar while it downloads.

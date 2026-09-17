@@ -585,6 +585,11 @@ impl Game {
             .collect()
     }
 
+    /// The theme of the superword on this board, if it is a superword board.
+    pub fn superword_theme(&self) -> Option<&'static str> {
+        self.superwords().iter().find_map(|w| crate::rotation::superword_theme(w))
+    }
+
     /// The results screen's third tab: the theme's words on a themed board, the
     /// superword on a superword board, otherwise the board's longest words.
     pub fn highlight_tab(&self) -> (String, Vec<&String>) {
@@ -606,7 +611,10 @@ impl Game {
             return theme.clone();
         }
         if !self.superwords().is_empty() {
-            return "Superword".to_string();
+            return match self.superword_theme() {
+                Some(theme) => format!("Superword · {theme}"),
+                None => "Superword".to_string(),
+            };
         }
 
         let longest = self.words.common.first().map(|w| w.len()).unwrap_or(0);
@@ -1323,7 +1331,7 @@ mod tests {
     #[test]
     fn a_letter_lists_exactly_the_words_that_run_through_it() {
         let mut game = Game::new();
-        game.grid = board(["cats", "zazz", "zzzz", "zzzz"]);
+        game.grid = board(["cats", "qaqq", "qqqq", "qqqq"]);
         game.words = solve_board(&game.dictionary, &game.grid);
 
         let t = Position { row: 0, col: 2 };
@@ -1339,7 +1347,7 @@ mod tests {
         }
 
         // A word that never touches the tile is not listed: nothing here reaches
-        // the bottom corner.
+        // the bottom corner. (Q, not Z: the full dictionary has "zzz".)
         assert!(game.words_through(Position { row: 3, col: 3 }).is_empty());
     }
 
@@ -1494,7 +1502,7 @@ mod tests {
         game.words.common.insert(0, "aeroplane".to_string());
         assert_ne!(game.board_type(), "Superword");
         game.words.common.insert(0, "characterization".to_string());
-        assert_eq!(game.board_type(), "Superword");
+        assert_eq!(game.board_type(), "Superword · Language");
         assert_eq!(game.highlight_tab().0, "Superword");
     }
 

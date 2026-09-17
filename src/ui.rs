@@ -725,7 +725,10 @@ impl WordLegendApp {
             // What kind of board this is.
             let kind = match &self.game.theme {
                 Some(theme) => format!("Theme: {theme}"),
-                None if !self.game.superwords().is_empty() => "Superword board: one word fills every tile".to_string(),
+                None if !self.game.superwords().is_empty() => match self.game.superword_theme() {
+                    Some(theme) => format!("Superword board · Theme: {theme}"),
+                    None => "Superword board: one word fills every tile".to_string(),
+                },
                 None => String::new(),
             };
             ui.add_sized([ui.available_width(), 22.0], egui::Label::new(egui::RichText::new(kind).size(15.0).color(GOLD).strong()));

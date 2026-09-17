@@ -17,6 +17,46 @@
  */
 
 export { Leaderboard } from "./leaderboard.js";
+export { Player } from "./player.js";
+
+/** A player's banked scores. */
+const playerScores = (env, id) => env.PLAYER.getByName(`player:${id}`);
+
+/**
+ * Round packs never change once uploaded, so each isolate keeps the ones it has
+ * read for a while instead of reading KV on every request. Ten minutes also lets
+ * a fresh upload through without a redeploy.
+ */
+const PACK_CACHE_MS = 10 * 60 * 1000;
+/** Per KV binding, so a cached pack is always one from the namespace asked. */
+const packCaches = new WeakMap();
+
+/** The cache belonging to a binding, made on first use. */
+function cacheFor(caches, binding) {
+  let cache = caches.get(binding);
+  if (!cache) {
+    cache = new Map();
+    caches.set(binding, cache);
+  }
+  return cache;
+}
+
+async function readPack(env, key) {
+  const cache = cacheFor(packCaches, env.ROUNDS);
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < PACK_CACHE_MS) return hit.pack;
+  const pack = await env.ROUNDS.get(key, "json");
+  cache.set(key, { at: Date.now(), pack });
+  return pack;
+}
+
+/**
+ * Many players read the same table in the same second as a round ends. An
+ * isolate answers repeats from memory for a moment, and forgets a round's table
+ * as soon as a score for it is filed here.
+ */
+const TABLE_CACHE_MS = 1500;
+const tableCaches = new WeakMap();
 
 /** The Durable Object holding a round's leaderboard. */
 const leaderboard = (env, round) => env.LEADERBOARD.getByName(`round:${round}`);
@@ -121,9 +161,7 @@ async function loadRound(env, round) {
   const slot = round % (packCount * packSize);
   const index = Math.floor(slot / packSize);
   const month = String(roundMonth(env, round)).padStart(2, "0");
-  const pack =
-    (await env.ROUNDS.get(`pack:m${month}:${index}`, "json")) ??
-    (await env.ROUNDS.get(`pack:${index}`, "json"));
+  const pack = (await readPack(env, `pack:m${month}:${index}`)) ?? (await readPack(env, `pack:${index}`));
   if (!pack) return null;
   const entry = pack[slot % packSize];
   if (!entry) return null;
@@ -191,11 +229,12 @@ async function postClaim(request, env, body) {
     await env.ROUNDS.delete(`name:${previous.name.toLowerCase()}`);
   }
 
-  await env.ROUNDS.put(key, id);
-  await env.ROUNDS.put(
-    `player:${id}`,
-    JSON.stringify({ name, recent: previous?.recent ?? [] })
-  );
+  // Only a new or changed name costs KV writes; claiming the same name again, as
+  // the game does each time it starts, costs none.
+  if (owner !== id) await env.ROUNDS.put(key, id);
+  if (!previous || previous.name !== name) {
+    await env.ROUNDS.put(`player:${id}`, JSON.stringify({ ...(previous ?? {}), name }));
+  }
   return json(request, env, { ok: true, name });
 }
 
@@ -265,6 +304,7 @@ async function postProgress(request, env, body) {
   if (result.error) return result.error;
   const { id, round, player, score, accepted } = result;
   await leaderboard(env, round).submit(id, player.name, score, accepted.length, false, leagueOf(body));
+  cacheFor(tableCaches, env.LEADERBOARD).delete(round);
   return json(request, env, { score, accepted: accepted.length });
 }
 
@@ -275,15 +315,13 @@ async function postScore(request, env, body) {
   const { id, round, player, score, bonus, accepted, rejected } = result;
 
   await leaderboard(env, round).submit(id, player.name, score, accepted.length, true, leagueOf(body));
+  cacheFor(tableCaches, env.LEADERBOARD).delete(round);
 
   // Rank is the average of the last ten rounds, same as the client shows. A round
   // with nothing found was not played -- it is on the leaderboard as a zero, but
-  // it is not banked, or leaving a tab open would drag the average down.
-  let recent = player.recent ?? [];
-  if (score > 0) {
-    recent = [...recent, score].slice(-10);
-    await env.ROUNDS.put(`player:${id}`, JSON.stringify({ ...player, recent }));
-  }
+  // it is not banked, or leaving a tab open would drag the average down. Scores a
+  // player had in KV from before seed their Player object the first time.
+  const recent = await playerScores(env, id).bank(score, player.recent ?? []);
 
   const average = recent.length ? Math.round(recent.reduce((a, b) => a + b, 0) / recent.length) : 0;
   return json(request, env, { score, bonus, accepted: accepted.length, rejected, average });
@@ -295,7 +333,13 @@ async function getLeaderboard(request, env, url) {
   const target = Number.isFinite(round) ? round : schedule(env, Date.now() / 1000).round;
   // Ids stay inside the Durable Object: an id is the account, and a leaderboard
   // is public.
+  const tableCache = cacheFor(tableCaches, env.LEADERBOARD);
+  const cached = tableCache.get(target);
+  if (cached && Date.now() - cached.at < TABLE_CACHE_MS) {
+    return json(request, env, { round: target, entries: cached.entries });
+  }
   const entries = await leaderboard(env, target).table(50);
+  tableCache.set(target, { at: Date.now(), entries });
   return json(request, env, { round: target, entries });
 }
 
