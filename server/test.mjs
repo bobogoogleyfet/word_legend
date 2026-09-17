@@ -1,5 +1,5 @@
 // Worker tests. Run with: node test.mjs
-import worker, { Leaderboard, Player } from "./src/index.js";
+import worker, { Leaderboard, Player, Standings } from "./src/index.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
@@ -39,7 +39,14 @@ function makeNamespace(Class) {
       if (!instances.has(name)) {
         const store = new Map();
         const storage = {
-          async put(key, value) { store.set(key, structuredClone(value)); },
+          // The real storage also takes an object of several keys at once.
+          async put(key, value) {
+            if (key && typeof key === "object") {
+              for (const [k, v] of Object.entries(key)) store.set(k, structuredClone(v));
+              return;
+            }
+            store.set(key, structuredClone(value));
+          },
           async get(key) { return structuredClone(store.get(key)); },
           async list({ prefix = "" } = {}) {
             return new Map([...store].filter(([k]) => k.startsWith(prefix)).sort(([a], [b]) => a.localeCompare(b)));
@@ -63,6 +70,7 @@ const env = () => ({
   ROUNDS: makeKV({ "pack:0": JSON.stringify(pack) }),
   LEADERBOARD: makeNamespace(Leaderboard),
   PLAYER: makeNamespace(Player),
+  STANDINGS: makeNamespace(Standings),
   ROUND_SECONDS: "180", RESULTS_SECONDS: "30",
   PACK_COUNT: "1", PACK_SIZE: String(pack.length),
   ALLOWED_ORIGINS: ORIGIN,
@@ -405,6 +413,47 @@ await test("progress that changes nothing, or comes too fast, is not written", a
   } finally {
     Date.now = realNow;
   }
+});
+
+await test("the all-time table ranks players by average, with their best and games", async () => {
+  const e = env();
+  const players = [
+    { id: "0123456789ABCDEF", name: "steady", league: 2, scores: [6000, 6000] },
+    { id: "FEDCBA9876543210", name: "spiky", league: 1, scores: [1000, 9000] },
+    { id: "0000111122223333", name: "quiet", league: 0, scores: [500] },
+  ];
+  // Bank each player's rounds through their Player object, as a scored round does,
+  // then file the standing the same way /score does.
+  for (const p of players) {
+    await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: p.id, name: p.name }) });
+    for (const s of p.scores) {
+      const { recent, best, games } = await e.PLAYER.getByName(`player:${p.id}`).bank(s, []);
+      const average = Math.round(recent.reduce((a, b) => a + b, 0) / recent.length);
+      await e.STANDINGS.getByName("standings").record(p.id, p.name, p.league, average, best, games);
+    }
+  }
+  const table = (await body(await call(e, "/standings"))).entries;
+  assert.deepEqual(
+    table.map((r) => [r.name, r.average, r.best, r.games, r.league]),
+    [
+      ["steady", 6000, 6000, 2, 2],
+      ["spiky", 5000, 9000, 2, 1],
+      ["quiet", 500, 500, 1, 0],
+    ],
+    "the table should be ranked by average, with each player's best and games"
+  );
+  assert.ok(!JSON.stringify(table).includes("0123456789ABCDEF"), "an account id leaked onto the table");
+
+  const short = (await body(await call(e, "/standings?limit=1"))).entries;
+  assert.equal(short.length, 1);
+});
+
+await test("a scored round puts the player on the all-time table", async () => {
+  const e = env();
+  await call(e, "/claim", { method: "POST", body: JSON.stringify({ id: ID, name: "wordfan" }) });
+  const res = await body(await call(e, "/score", { method: "POST", body: JSON.stringify({ id: ID, round: roundInfo.round, words: realWords, league: 3 }) }));
+  const table = (await body(await call(e, "/standings"))).entries;
+  assert.deepEqual(table, [{ name: "wordfan", league: 3, average: res.score, best: res.score, games: 1 }]);
 });
 
 await test("unknown routes 404", async () => {

@@ -126,8 +126,9 @@ one.
 
 The **Stats** page (from the home screen) charts your last fifty games — each
 game's score and the average it left you with — and shows every league with the
-average it takes, your best game (score, best word, most words), all-time
-averages and totals.
+average it takes, the **all-time leaderboard** (every player by their average,
+with their league, best round and games played), your best game (score, best
+word, most words), all-time averages and totals.
 
 Your league, history and stats are saved on the device: `localStorage` in the
 browser, dotfiles in your home directory on the desktop.

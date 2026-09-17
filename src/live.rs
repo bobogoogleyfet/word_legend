@@ -11,7 +11,7 @@
 
 use crate::game::{Game, Phase, RESULTS_SECONDS, ROUND_SECONDS};
 use crate::identity::Identity;
-use crate::net::{self, Claim, Client, Leaderboard, Link};
+use crate::net::{self, Claim, Client, Leaderboard, Link, Standings};
 
 const CYCLE: f32 = ROUND_SECONDS + RESULTS_SECONDS;
 /// How often to re-read the clock while all is well. The clock runs on from one
@@ -31,6 +31,8 @@ const CONNECT_GRACE: f64 = 10.0;
 /// for thirty seconds, and every read is a request. Everyone who played is already
 /// on the table from their progress, so the first read is nearly complete.
 const LEADERBOARD_READS: [f64; 4] = [1.0, 4.0, 10.0, 20.0];
+/// How often the all-time table is re-read while the stats page is open.
+const STANDINGS_EVERY: f64 = 30.0;
 /// How often progress is reported while a round is played, when there is news.
 /// Joining reports straight away, which is what puts a player on the table; after
 /// that, progress only keeps a player's score roughly current in case their final
@@ -70,6 +72,9 @@ pub struct Live {
     /// rounds to serve, which for playing purposes is the same as being down.
     boardless: bool,
     leaderboard: Option<Leaderboard>,
+    /// The all-time table, and when it was last asked for.
+    standings: Option<Standings>,
+    standings_asked: Option<f64>,
 
     first_poll: Option<f64>,
     last_poll: Option<f64>,
@@ -102,6 +107,8 @@ impl Live {
             board: None,
             boardless: false,
             leaderboard: None,
+            standings: None,
+            standings_asked: None,
             first_poll: None,
             last_poll: None,
             joined: false,
@@ -208,8 +215,29 @@ impl Live {
         !self.server_away(now) && !self.boardless
     }
 
+    /// The all-time table, once it has arrived.
+    pub fn standings(&self) -> Option<&Standings> {
+        self.standings.as_ref()
+    }
+
+    /// Ask for the all-time table, at most every half minute: it only changes as
+    /// rounds end, and the stats page is open for as long as a player reads it.
+    pub fn want_standings(&mut self, now: f64) {
+        if self.standings_asked.is_none_or(|t| now - t >= STANDINGS_EVERY) {
+            self.standings_asked = Some(now);
+            self.client.poll_standings();
+        }
+    }
+
     pub fn leaderboard_for(&self, round: u64) -> Option<&Leaderboard> {
         self.leaderboard.as_ref().filter(|t| t.round == round)
+    }
+
+    /// Put an all-time table in place as if the server had sent it.
+    #[cfg(test)]
+    pub fn show_standings(&mut self, table: Standings) {
+        self.standings_asked = Some(f64::MAX);
+        self.standings = Some(table);
     }
 
     /// Put a table in place as if the server had sent it.
@@ -244,6 +272,9 @@ impl Live {
             != self.leaderboard.as_ref().map(|t| (t.round, &t.entries))
         {
             self.leaderboard = shared.leaderboard.clone();
+        }
+        if shared.standings.is_some() {
+            self.standings = shared.standings.clone();
         }
         if self.name == NameStatus::Pending {
             match &shared.claim {
@@ -807,6 +838,20 @@ mod tests {
         let scores = sent_matching(&live, "POST /score");
         assert_eq!(scores.len(), 1, "the saved round was not handed in");
         assert!(scores[0].contains("\"came\""));
+    }
+
+    #[test]
+    fn the_all_time_table_is_asked_for_at_most_twice_a_minute() {
+        let mut game = Game::new();
+        let mut live = online();
+        serve(&live, 40, "play", 100.0, 0.0);
+        live.update(&mut game, Some(&me()), 0.0);
+        assert!(live.standings().is_none());
+        live.want_standings(1.0);
+        live.want_standings(10.0);
+        assert_eq!(sent_matching(&live, "GET /standings").len(), 1, "asked again within the half minute");
+        live.want_standings(40.0);
+        assert_eq!(sent_matching(&live, "GET /standings").len(), 2);
     }
 
     #[test]

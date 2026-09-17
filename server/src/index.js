@@ -18,6 +18,10 @@
 
 export { Leaderboard } from "./leaderboard.js";
 export { Player } from "./player.js";
+export { Standings } from "./standings.js";
+
+/** The all-time table. One object holds every player's row. */
+const standings = (env) => env.STANDINGS.getByName("standings");
 
 /** A player's banked scores. */
 const playerScores = (env, id) => env.PLAYER.getByName(`player:${id}`);
@@ -57,6 +61,13 @@ async function readPack(env, key) {
  */
 const TABLE_CACHE_MS = 1500;
 const tableCaches = new WeakMap();
+
+/**
+ * The all-time table only changes as rounds end, so an isolate keeps its answer
+ * for a while: it is read from the stats page, where a few seconds' age is fine.
+ */
+const STANDINGS_CACHE_MS = 30 * 1000;
+const standingsCache = new WeakMap();
 
 /** The Durable Object holding a round's leaderboard. */
 const leaderboard = (env, round) => env.LEADERBOARD.getByName(`round:${round}`);
@@ -321,10 +332,28 @@ async function postScore(request, env, body) {
   // with nothing found was not played -- it is on the leaderboard as a zero, but
   // it is not banked, or leaving a tab open would drag the average down. Scores a
   // player had in KV from before seed their Player object the first time.
-  const recent = await playerScores(env, id).bank(score, player.recent ?? []);
+  const { recent, best, games } = await playerScores(env, id).bank(score, player.recent ?? []);
 
   const average = recent.length ? Math.round(recent.reduce((a, b) => a + b, 0) / recent.length) : 0;
+  // The all-time table follows the same average the league does.
+  if (score > 0) {
+    await standings(env).record(id, player.name, leagueOf(body), average, best, games);
+    standingsCache.delete(env.STANDINGS);
+  }
   return json(request, env, { score, bonus, accepted: accepted.length, rejected, average });
+}
+
+/** The all-time table: every player's league, average, best score and games. */
+async function getStandings(request, env, url) {
+  const asked = parseInt(url.searchParams.get("limit") ?? "", 10);
+  const limit = Number.isFinite(asked) ? Math.min(Math.max(asked, 1), 100) : 50;
+  const cached = standingsCache.get(env.STANDINGS);
+  if (cached && cached.limit >= limit && Date.now() - cached.at < STANDINGS_CACHE_MS) {
+    return json(request, env, { entries: cached.entries.slice(0, limit) });
+  }
+  const entries = await standings(env).table(limit);
+  standingsCache.set(env.STANDINGS, { at: Date.now(), limit, entries });
+  return json(request, env, { entries });
 }
 
 /** The table for a round, names and scores only. */
@@ -357,6 +386,9 @@ export default {
       }
       if (url.pathname === "/leaderboard" && request.method === "GET") {
         return await getLeaderboard(request, env, url);
+      }
+      if (url.pathname === "/standings" && request.method === "GET") {
+        return await getStandings(request, env, url);
       }
       if (request.method === "POST") {
         const body = await request.json().catch(() => null);

@@ -41,6 +41,16 @@ class_name = "Player"
 tag = "v2"
 new_sqlite_classes = ["Player"]
 
+# One Durable Object holds the all-time table, since it is sorted across every
+# player. Written once per scored round, read from the stats page.
+[[durable_objects.bindings]]
+name = "STANDINGS"
+class_name = "Standings"
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["Standings"]
+
 [vars]
 # Public knobs only. Secrets never appear here.
 ROUND_SECONDS = "180"

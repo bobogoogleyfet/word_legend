@@ -1907,6 +1907,12 @@ impl WordLegendApp {
             app.stacked(ui, |_, ui| league_ladder(ui, league, average));
             ui.add_space(14.0);
 
+            // Everyone's standing, by the average their league follows.
+            app.live.want_standings(app.now);
+            let mine = app.identity.as_ref().map(|i| i.name.to_lowercase()).unwrap_or_default();
+            app.stacked(ui, |app, ui| all_time_table(ui, app.live.standings(), &mine, narrow));
+            ui.add_space(14.0);
+
             let per_game = |total: u64| if life.games == 0 { "—".to_string() } else { thousands((total / life.games) as usize) };
             let best_word = match &life.best_word {
                 Some((word, points)) => format!("{word} ({points} points)"),
@@ -2368,6 +2374,54 @@ fn legend_key(ui: &mut egui::Ui, color: Color32, label: &str) {
     ui.painter().line_segment([key.left_center(), key.right_center()], Stroke::new(2.0_f32, color));
     ui.painter().circle(key.center(), 3.0, color, Stroke::NONE);
     ui.label(egui::RichText::new(label).size(11.0).color(MUTED));
+}
+
+/// The all-time table: every player by the average their league follows, with
+/// their best round and how many they have played. The player's own row is picked
+/// out in gold.
+fn all_time_table(ui: &mut egui::Ui, standings: Option<&net::Standings>, mine: &str, narrow: bool) {
+    ui.label(egui::RichText::new("All-time leaderboard").size(14.0).color(TEXT).strong());
+    let Some(table) = standings.filter(|t| !t.entries.is_empty()) else {
+        let waiting = match standings {
+            Some(_) => "No games have been banked yet.",
+            None => "Asking the server…",
+        };
+        ui.label(egui::RichText::new(waiting).size(12.0).color(MUTED));
+        return;
+    };
+
+    let columns = if narrow { 4 } else { 5 };
+    ui.add_space(4.0);
+    egui::Grid::new("all_time_table").num_columns(columns).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
+        let heading = |ui: &mut egui::Ui, label: &str| {
+            ui.label(egui::RichText::new(label).size(11.0).color(MUTED).strong());
+        };
+        for label in ["", "Player", "Average", "Best"] {
+            heading(ui, label);
+        }
+        if !narrow {
+            heading(ui, "Games");
+        }
+        ui.end_row();
+
+        for (i, row) in table.entries.iter().enumerate() {
+            let me = row.name.to_lowercase() == mine;
+            let color = if me { GOLD } else { TEXT };
+            ui.label(egui::RichText::new(format!("{}.", i + 1)).size(12.0).color(MUTED));
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&row.name).size(13.0).color(color).strong());
+                if let Some(league) = row.league.filter(|l| *l < LEAGUES.len()) {
+                    ui.label(egui::RichText::new(LEAGUES[league].name).size(11.0).color(league_color(league)).strong());
+                }
+            });
+            ui.label(egui::RichText::new(thousands(row.average as usize)).size(13.0).color(color).strong());
+            ui.label(egui::RichText::new(thousands(row.best as usize)).size(12.0).color(color));
+            if !narrow {
+                ui.label(egui::RichText::new(thousands(row.games as usize)).size(12.0).color(MUTED));
+            }
+            ui.end_row();
+        }
+    });
 }
 
 /// Every league and the average it takes, with where the player stands: the
@@ -3039,6 +3093,33 @@ mod tests {
         let shapes = form_panel_frame(&app, &ctx, vec![]);
         assert!(texts_of(&shapes).iter().any(|t| t == "Your rounds will chart here"));
         assert!(lines_in(&shapes, SERIES_SCORES).is_empty());
+    }
+
+    #[test]
+    fn the_stats_page_shows_the_all_time_leaderboard() {
+        for size in [PHONES[0], Vec2::new(1000.0, 780.0)] {
+            let mut app = offline_app(true);
+            app.game.ranking.record_round(5_000, 20, None);
+            app.show_stats = true;
+            app.live.show_standings(net::Standings {
+                entries: vec![
+                    net::Standing { name: "ace".into(), average: 41_000, best: 62_000, games: 300, league: Some(4) },
+                    net::Standing { name: "longest_name_16c".into(), average: 5_000, best: 9_400, games: 12, league: Some(1) },
+                ],
+            });
+            let (_, top) = run_frames(&mut app, size, 12);
+            let texts = texts_of(&top);
+            for expected in ["All-time leaderboard", "Player", "Average", "Best", "ace", "41,000", "62,000", "Diamond"] {
+                assert!(texts.iter().any(|t| t == expected), "the all-time table at {size:?} is missing {expected:?}: {texts:?}");
+            }
+            // The player's own row is picked out, and rows are numbered in order.
+            let own = top.iter().any(|s| matches!(s, egui::Shape::Text(t) if t.galley.job.text == "longest_name_16c" && t.galley.job.sections[0].format.color == GOLD));
+            assert!(own, "the player's own row is not picked out at {size:?}");
+            let first = text_centre(&top, "ace").expect("first row");
+            let second = text_centre(&top, "longest_name_16c").expect("second row");
+            assert!(first.y < second.y, "rows are out of order at {size:?}");
+            assert_fits("all-time table", &top, size);
+        }
     }
 
     #[test]

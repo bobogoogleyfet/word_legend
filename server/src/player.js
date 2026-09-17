@@ -17,11 +17,25 @@ export class Player extends DurableObject {
   async bank(score, legacy = []) {
     let recent = await this.ctx.storage.get("recent");
     if (recent === undefined) recent = Array.isArray(legacy) ? legacy.slice(-10) : [];
+    let best = (await this.ctx.storage.get("best")) ?? Math.max(0, ...recent);
+    let games = (await this.ctx.storage.get("games")) ?? recent.length;
     if (score > 0) {
       recent = [...recent, score].slice(-10);
-      await this.ctx.storage.put("recent", recent);
+      best = Math.max(best, score);
+      games += 1;
+      await this.ctx.storage.put({ recent, best, games });
     }
-    return recent;
+    return { recent, best, games };
+  }
+
+  /** What this player has banked, without banking anything. */
+  async standing() {
+    const recent = (await this.ctx.storage.get("recent")) ?? [];
+    return {
+      recent,
+      best: (await this.ctx.storage.get("best")) ?? Math.max(0, ...recent, 0),
+      games: (await this.ctx.storage.get("games")) ?? recent.length,
+    };
   }
 
   /** The recent scores, without banking anything. */

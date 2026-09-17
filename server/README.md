@@ -13,6 +13,7 @@ scores and keeps each round's leaderboard.
 | KV `ROUNDS` — `player:<id>` | an account's display name | when a name is claimed or changed |
 | Durable Object `Player`, one per account | the last ten banked scores | each scored round |
 | Durable Object `Leaderboard`, one per round | that round's table: names, scores, leagues | progress and final scores |
+| Durable Object `Standings`, one in all | the all-time table: a row per player | each scored round |
 
 In the Cloudflare dashboard: **Storage & Databases → KV** for the namespace, and
 **Workers & Pages → word-legend → Durable Objects** for the objects. No files,
@@ -135,6 +136,7 @@ other. A player's league on the leaderboard is as their game reports it.
 | `POST /progress` | `{id, round, words[], paths[], league}` — progress while playing; nothing banked |
 | `POST /score` | `{id, round, words[], paths[], league}` — the final score, scored and banked in the player's Durable Object |
 | `GET /leaderboard?round=` | names, scores, word counts, leagues and whether each is final |
+| `GET /standings?limit=` | the all-time table: names, leagues, averages, best rounds and games played |
 
 The board's word list is never sent to clients: they work it out themselves, and
 handing it over would turn each round into a copying exercise.
@@ -150,8 +152,8 @@ The tests run under plain Node, with a stand-in for `cloudflare:workers` and an
 in-memory namespace for the Durable Objects, and the clock pinned mid-round. They
 cover names, forged and invented scores, the obscure and superword bonuses, the
 letter bonus against valid and invalid paths, simultaneous submissions,
-progress and its throttling, the monthly packs, the leaderboard's leagues, and
-that a scored round costs no KV write.
+progress and its throttling, the monthly packs, the leaderboard's leagues, the
+all-time table's ranking, and that a scored round costs no KV write.
 
 ## Cost, and staying free
 

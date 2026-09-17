@@ -67,6 +67,23 @@ pub struct Leaderboard {
     pub entries: Vec<Entry>,
 }
 
+/// One player's place on the all-time table.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Standing {
+    pub name: String,
+    /// The rank average their league follows.
+    pub average: u32,
+    pub best: u32,
+    pub games: u64,
+    #[serde(default)]
+    pub league: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Standings {
+    pub entries: Vec<Standing>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Submitted {
     pub score: u32,
@@ -135,6 +152,7 @@ pub enum Claim {
 pub struct Shared {
     pub round: Option<RoundInfo>,
     pub leaderboard: Option<Leaderboard>,
+    pub standings: Option<Standings>,
     /// The server's verdict on a submitted round, and which round it was for.
     pub submitted: Option<(u64, Submitted)>,
     /// Why the server turned a submission down, if it did.
@@ -288,6 +306,20 @@ impl Client {
         }
         let body = serde_json::to_vec(&ScoreRequest { id, round, words, paths, league }).unwrap_or_default();
         self.fetch(post(format!("{}/progress", self.base), body), |_| {});
+    }
+
+    /// Ask for the all-time table, for the stats page.
+    pub fn poll_standings(&self) {
+        if !self.is_configured() {
+            return;
+        }
+        let shared = Arc::clone(&self.shared);
+        self.fetch(ehttp::Request::get(format!("{}/standings?limit=50", self.base)), move |result| {
+            let Ok(mut guard) = shared.lock() else { return };
+            if let Ok(table) = parse::<Standings>(result) {
+                guard.standings = Some(table);
+            }
+        });
     }
 
     pub fn poll_leaderboard(&self, round: u64) {
