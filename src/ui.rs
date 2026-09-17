@@ -1487,13 +1487,6 @@ impl WordLegendApp {
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
         let _ = response;
 
-        // The path of the word picked from the letter's list, under the tiles.
-        if let Some(path) = self.letter_focus.as_ref().and_then(|f| f.shown.map(|i| &f.words[i].1)) {
-            let centres: Vec<Pos2> = path.iter().map(|p| geom.center(*p)).collect();
-            for pair in centres.windows(2) {
-                painter.line_segment([pair[0], pair[1]], Stroke::new(size * 0.04, ACCENT.gamma_multiply(0.8)));
-            }
-        }
 
         for row in 0..SIZE {
             for col in 0..SIZE {
@@ -1520,6 +1513,20 @@ impl WordLegendApp {
                 if self.letter_focus.as_ref().is_some_and(|f| f.at == at) {
                     painter.rect_stroke(rect.expand(2.0), rect.width() * 0.2, Stroke::new(3.0_f32, GOLD), egui::StrokeKind::Outside);
                 }
+            }
+        }
+
+        // The path of the word picked from the letter's list, drawn over the tiles
+        // so it cannot hide behind them, and translucent so the letters still read
+        // through it. A dot marks where the word starts.
+        if let Some(path) = self.letter_focus.as_ref().and_then(|f| f.shown.map(|i| &f.words[i].1)) {
+            let centres: Vec<Pos2> = path.iter().map(|p| geom.center(*p)).collect();
+            let color = ACCENT.gamma_multiply(0.6);
+            for pair in centres.windows(2) {
+                painter.line_segment([pair[0], pair[1]], Stroke::new(size * 0.035, color));
+            }
+            if let Some(start) = centres.first() {
+                painter.circle_filled(*start, size * 0.04, color);
             }
         }
 
@@ -3123,6 +3130,22 @@ mod tests {
             assert_eq!(shown.as_deref(), Some(first.as_str()), "tapping the word did not pick it at {size:?}");
             let after = shapes.iter().filter(|s| matches!(s, egui::Shape::LineSegment { .. })).count();
             assert!(after >= before + first.len() - 1, "{first}'s path was not drawn at {size:?}");
+
+            // Drawn over the letters, not under them: every path segment is painted
+            // after the last letter on the small board.
+            let last_letter = shapes
+                .iter()
+                .rposition(|s| matches!(s, egui::Shape::Text(t) if t.galley.job.text == "G" && s.visual_bounding_rect().width() < 30.0))
+                .expect("the small board's letters");
+            let path_width = small[0].width() * 4.0 * 0.035;
+            let segments: Vec<usize> = shapes
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| matches!(s, egui::Shape::LineSegment { stroke, .. } if (stroke.width - path_width).abs() < 1.5))
+                .map(|(i, _)| i)
+                .collect();
+            assert!(!segments.is_empty(), "no path segments found at {size:?}");
+            assert!(segments.iter().all(|i| *i > last_letter), "the path is drawn under the letters at {size:?}");
 
             // Tapping the letter again goes back to the lists.
             frame(&mut app, vec![egui::Event::PointerMoved(a_tile), button(a_tile, true)]);
