@@ -5,6 +5,11 @@
 //! Left to chance, a one-in-five board can go twenty rounds without showing up
 //! and then come twice in a row; scheduled, it is always the fifth.
 //!
+//! Each month favours its season: Halloween in October, Christmas in December,
+//! and so on. When a month is given, the second round of every five is that
+//! month's theme -- a fifth of all rounds, several times any other theme, and
+//! always five rounds apart -- and the regular themes rotate through the rest.
+//!
 //! - A **superword board** is built around one word that fills all sixteen tiles.
 //!   The word is laid along a path through every tile, so the whole board is that
 //!   word, and it is the best-playing of many such layouts.
@@ -39,6 +44,32 @@ pub const SUPERWORD_EVERY: u64 = 5;
 pub const ROTATION_THEMES: [&str; 10] = [
     "Animals", "Food", "Nature", "Body", "Music", "Science", "Math", "History", "Verbs", "Adjectives",
 ];
+
+/// The theme each month favours, January first. Each is in `themes.txt` and, like
+/// the rotation themes, measured to reach [`THEME_WORDS_REQUIRED`] on a board.
+pub const SEASONAL_THEMES: [&str; 12] = [
+    "Winter",
+    "Valentine's Day",
+    "St. Patrick's Day",
+    "Easter",
+    "Spring",
+    "Summer",
+    "Fourth of July",
+    "School",
+    "Fall",
+    "Halloween",
+    "Thanksgiving",
+    "Christmas",
+];
+
+/// The theme a month (1 = January) favours.
+pub fn season_for_month(month: u32) -> Option<&'static str> {
+    SEASONAL_THEMES.get((month as usize).checked_sub(1)?).copied()
+}
+
+/// Where in each block of five the month's seasonal theme falls: the second round,
+/// as far from the superword round at the block's end as it can be.
+const SEASONAL_POSITION: u64 = 1;
 
 /// Search steps a themed board gets before the search restarts from a new plant.
 const THEME_SEARCH_STEPS: usize = 30_000;
@@ -76,8 +107,8 @@ fn mix(mut x: u64) -> u64 {
 }
 
 
-/// The board kind for a round slot.
-pub fn kind_for_slot(slot: u64, superwords: &[String]) -> RoundKind {
+/// The board kind for a round slot, favouring `season`'s theme when one is given.
+pub fn kind_for_slot(slot: u64, superwords: &[String], season: Option<&str>) -> RoundKind {
     let block = slot / SUPERWORD_EVERY;
     let within = slot % SUPERWORD_EVERY;
 
@@ -86,9 +117,18 @@ pub fn kind_for_slot(slot: u64, superwords: &[String]) -> RoundKind {
         return RoundKind::Superword(superword_for_block(block, superwords));
     }
 
-    // How many themed rounds came before this one: four per whole block, plus the
-    // themed rounds earlier in this block.
-    let themed_before = block * (SUPERWORD_EVERY - 1) + within;
+    let Some(season) = season else {
+        // How many themed rounds came before this one: four per whole block, plus
+        // the themed rounds earlier in this block.
+        let themed_before = block * (SUPERWORD_EVERY - 1) + within;
+        return RoundKind::Themed(theme_at(themed_before).to_string());
+    };
+
+    if within == SEASONAL_POSITION {
+        return RoundKind::Themed(season.to_string());
+    }
+    // The regular rotation carries on through the other three.
+    let themed_before = block * (SUPERWORD_EVERY - 2) + within - u64::from(within > SEASONAL_POSITION);
     RoundKind::Themed(theme_at(themed_before).to_string())
 }
 
@@ -139,6 +179,15 @@ pub fn build_round(
             }
         }
         RoundKind::Themed(name) => {
+            // A seasonal theme is tried first; if its board cannot be found, the
+            // round falls back through the regular rotation like any other.
+            if !ROTATION_THEMES.contains(&name.as_str()) {
+                if let Some(theme) = themes.list.iter().find(|t| &t.name == name) {
+                    if let Some((grid, words)) = build_theme_board(dict, theme, &mut rng) {
+                        return (grid, words, Some(theme.name.clone()));
+                    }
+                }
+            }
             let start = ROTATION_THEMES.iter().position(|t| t == name).unwrap_or(0);
             for offset in 0..ROTATION_THEMES.len() {
                 let name = ROTATION_THEMES[(start + offset) % ROTATION_THEMES.len()];
@@ -408,7 +457,7 @@ mod tests {
     fn every_fifth_round_is_a_superword_board() {
         let words = superwords();
         for slot in 0..3_000u64 {
-            let superword = matches!(kind_for_slot(slot, &words), RoundKind::Superword(_));
+            let superword = matches!(kind_for_slot(slot, &words, None), RoundKind::Superword(_));
             assert_eq!(superword, slot % 5 == 4, "slot {slot}: superword board {superword}");
         }
         // The packs repeat every thousand rounds; five divides it, so the pattern
@@ -442,7 +491,7 @@ mod tests {
     fn themes_rotate_evenly_and_never_back_to_back() {
         let words = superwords();
         let themed: Vec<String> = (0..2_000u64)
-            .filter_map(|slot| match kind_for_slot(slot, &words) {
+            .filter_map(|slot| match kind_for_slot(slot, &words, None) {
                 RoundKind::Themed(t) => Some(t),
                 RoundKind::Superword(_) => None,
             })
@@ -495,10 +544,56 @@ mod tests {
     }
 
     #[test]
-    fn every_rotation_theme_exists() {
+    fn every_rotation_and_seasonal_theme_exists() {
         let themes = Themes::load();
+        for name in ROTATION_THEMES.iter().chain(SEASONAL_THEMES.iter()) {
+            assert!(themes.list.iter().any(|t| t.name == *name), "{name} is scheduled but not in themes.txt");
+        }
+        for name in SEASONAL_THEMES {
+            assert!(!ROTATION_THEMES.contains(&name), "{name} is seasonal; it must not also rotate year-round");
+        }
+    }
+
+    #[test]
+    fn each_month_favours_its_season() {
+        assert_eq!(season_for_month(9), Some("Fall"));
+        assert_eq!(season_for_month(10), Some("Halloween"));
+        assert_eq!(season_for_month(11), Some("Thanksgiving"));
+        assert_eq!(season_for_month(12), Some("Christmas"));
+        assert_eq!(season_for_month(1), Some("Winter"));
+        assert_eq!(season_for_month(2), Some("Valentine's Day"));
+        assert_eq!(season_for_month(3), Some("St. Patrick's Day"));
+        assert_eq!(season_for_month(4), Some("Easter"));
+        assert_eq!(season_for_month(5), Some("Spring"));
+        assert_eq!(season_for_month(6), Some("Summer"));
+        assert_eq!(season_for_month(7), Some("Fourth of July"));
+        assert_eq!(season_for_month(8), Some("School"));
+        assert_eq!(season_for_month(0), None);
+        assert_eq!(season_for_month(13), None);
+
+        let words = superwords();
+        let kinds: Vec<RoundKind> = (0..2_000u64).map(|slot| kind_for_slot(slot, &words, Some("Halloween"))).collect();
+        let themed: Vec<&str> = kinds
+            .iter()
+            .filter_map(|k| match k {
+                RoundKind::Themed(t) => Some(t.as_str()),
+                RoundKind::Superword(_) => None,
+            })
+            .collect();
+        let halloween = themed.iter().filter(|t| **t == "Halloween").count();
+        assert_eq!(halloween, 400, "the season should be one round in five");
+        // Several times as often as any regular theme, which share the other 1,200.
         for name in ROTATION_THEMES {
-            assert!(themes.list.iter().any(|t| t.name == name), "{name} is in the rotation but not in themes.txt");
+            let count = themed.iter().filter(|t| **t == name).count();
+            assert_eq!(count, 120, "{name} came up {count} times");
+            assert!(halloween >= 3 * count);
+        }
+        // Never back to back, and superwords still every fifth round.
+        for (slot, pair) in kinds.windows(2).enumerate() {
+            assert_ne!(pair[0], pair[1], "rounds {slot} and {} repeat", slot + 1);
+        }
+        for (slot, kind) in kinds.iter().enumerate() {
+            assert_eq!(matches!(kind, RoundKind::Superword(_)), slot % 5 == 4);
         }
     }
 
@@ -509,8 +604,8 @@ mod tests {
     fn rotation_themes_can_reach_the_bar() {
         let dict = Dictionary::new();
         let themes = Themes::load();
-        for name in ROTATION_THEMES {
-            let theme = themes.list.iter().find(|t| t.name == name).unwrap();
+        for name in ROTATION_THEMES.iter().chain(SEASONAL_THEMES.iter()) {
+            let theme = themes.list.iter().find(|t| t.name == *name).unwrap();
             let found = (0..3u64).filter(|s| build_theme_board(&dict, theme, &mut StdRng::seed_from_u64(*s)).is_some()).count();
             assert!(found >= 2, "{name}: only {found} of 3 searches reached {THEME_WORDS_REQUIRED}");
         }

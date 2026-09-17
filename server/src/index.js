@@ -70,12 +70,25 @@ function schedule(env, nowSeconds) {
   };
 }
 
-/** The board for a round, from the uploaded packs. */
+/** The month a round is played in, 1 to 12, by when it starts (UTC). */
+function roundMonth(env, round) {
+  return new Date((EPOCH + round * CYCLE(env)) * 1000).getUTCMonth() + 1;
+}
+
+/**
+ * The board for a round, from the uploaded packs. Each month has its own rounds,
+ * favouring that month's seasonal theme; a month not uploaded falls back to the
+ * default rounds.
+ */
 async function loadRound(env, round) {
   const packCount = num(env.PACK_COUNT, 10);
   const packSize = num(env.PACK_SIZE, 100);
   const slot = round % (packCount * packSize);
-  const pack = await env.ROUNDS.get(`pack:${Math.floor(slot / packSize)}`, "json");
+  const index = Math.floor(slot / packSize);
+  const month = String(roundMonth(env, round)).padStart(2, "0");
+  const pack =
+    (await env.ROUNDS.get(`pack:m${month}:${index}`, "json")) ??
+    (await env.ROUNDS.get(`pack:${index}`, "json"));
   if (!pack) return null;
   const entry = pack[slot % packSize];
   if (!entry) return null;

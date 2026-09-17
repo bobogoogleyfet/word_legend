@@ -213,6 +213,17 @@ await test("an older pack, with both tiers in words, still scores everything as 
   assert.equal(res.score, 500);
 });
 
+await test("a month's own rounds are served when uploaded, the default ones otherwise", async () => {
+  const month = String(new Date(Date.now()).getUTCMonth() + 1).padStart(2, "0");
+  const board = (theme) => ({ grid: Array(16).fill("a"), theme, words: ["cat"], obscure: [] });
+  const e = { ...env(), PACK_SIZE: "1" };
+  e.ROUNDS = makeKV({ "pack:0": JSON.stringify([board("Animals")]) });
+  assert.equal((await body(await call(e, "/round"))).board.theme, "Animals", "no default rounds served");
+
+  e.ROUNDS = makeKV({ "pack:0": JSON.stringify([board("Animals")]), [`pack:m${month}:0`]: JSON.stringify([board("Halloween")]) });
+  assert.equal((await body(await call(e, "/round"))).board.theme, "Halloween", "the month's rounds were not preferred");
+});
+
 await test("players finishing at the same moment all reach the leaderboard", async () => {
   // Everyone's round ends on the same tick, so submissions really do arrive
   // together. A read-modify-write table loses all but one of them.

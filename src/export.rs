@@ -17,9 +17,11 @@ pub const PACK_SIZE: u64 = 100;
 
 /// Build one round as JSON: its kind comes from the curated rotation, and the
 /// board is built from the round number, so rebuilding a round gives the same one.
-fn round_json(dict: &Dictionary, themes: &Themes, superwords: &[String], round: u64) -> String {
-    let kind = rotation::kind_for_slot(round, superwords);
-    let (grid, words, theme) = rotation::build_round(dict, themes, &kind, round);
+fn round_json(dict: &Dictionary, themes: &Themes, superwords: &[String], round: u64, month: Option<u32>) -> String {
+    let kind = rotation::kind_for_slot(round, superwords, month.and_then(rotation::season_for_month));
+    // Each month's rounds are their own boards, not the default ones re-themed.
+    let seed = round ^ (u64::from(month.unwrap_or(0)) << 40);
+    let (grid, words, theme) = rotation::build_round(dict, themes, &kind, seed);
 
     // A themed round that fell back to another theme, or to a plain board, says so:
     // the rotation is meant to be exact, so a fallback is worth knowing about.
@@ -62,7 +64,7 @@ fn round_json(dict: &Dictionary, themes: &Themes, superwords: &[String], round: 
 /// every core: themed boards are searched for, and a thousand of them one at a
 /// time would take the better part of an hour.
 /// Returns `(pack_index, json)` pairs.
-pub fn build_packs(first: u64, count: u64) -> Vec<(u64, String)> {
+pub fn build_packs(first: u64, count: u64, month: Option<u32>) -> Vec<(u64, String)> {
     let end = first + count;
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u64;
     let next = std::sync::atomic::AtomicU64::new(first);
@@ -79,7 +81,7 @@ pub fn build_packs(first: u64, count: u64) -> Vec<(u64, String)> {
                     if round >= end {
                         break;
                     }
-                    let json = round_json(&dict, &themes, &superwords, round);
+                    let json = round_json(&dict, &themes, &superwords, round, month);
                     let mut built = built.lock().expect("no builder panicked");
                     built.insert(round, json);
                     let done = built.len() as u64;
@@ -110,7 +112,7 @@ mod tests {
 
     #[test]
     fn a_pack_holds_playable_rounds() {
-        let packs = build_packs(0, 3);
+        let packs = build_packs(0, 3, None);
         assert_eq!(packs.len(), 1);
         let (index, json) = &packs[0];
         assert_eq!(*index, 0);
@@ -128,8 +130,16 @@ mod tests {
     }
 
     #[test]
+    fn a_months_pack_carries_its_season() {
+        let packs = build_packs(0, 2, Some(10));
+        let json = &packs[0].1;
+        // Slot 1 is the season's slot in its block of five.
+        assert!(json.contains("\"theme\":\"Halloween\""), "October's rounds have no Halloween board");
+    }
+
+    #[test]
     fn packs_split_on_the_pack_size() {
-        let packs = build_packs(PACK_SIZE - 1, 2);
+        let packs = build_packs(PACK_SIZE - 1, 2, None);
         assert_eq!(packs.len(), 2, "a run straddling a boundary makes two packs");
         assert_eq!(packs[0].0, 0);
         assert_eq!(packs[1].0, 1);
@@ -141,9 +151,9 @@ mod tests {
         let dict = Dictionary::new();
         let themes = Themes::load();
         let superwords = rotation::superwords();
-        let kind = rotation::kind_for_slot(5, &superwords);
+        let kind = rotation::kind_for_slot(5, &superwords, None);
         let (grid, words, _) = rotation::build_round(&dict, &themes, &kind, 5);
-        let json = round_json(&dict, &themes, &superwords, 5);
+        let json = round_json(&dict, &themes, &superwords, 5, None);
 
         for word in words.common.iter().take(20) {
             assert!(json.contains(&format!("\"{word}\"")), "{word} missing from the pack");
