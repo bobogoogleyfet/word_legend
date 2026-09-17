@@ -78,8 +78,6 @@ impl Signup {
     }
 }
 
-/// Below this window height the results card cannot fit and has to scroll.
-const SHORT_WINDOW: f32 = 720.0;
 
 /// Below this width -- a phone held upright -- layouts stack instead of sitting
 /// side by side, and the found-words panel gives its room to the board.
@@ -559,7 +557,7 @@ impl WordLegendApp {
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new("WORD LEGEND").size(13.0).color(ACCENT).strong());
                 ui.label(
-                    egui::RichText::new(format!("{}", self.game.score))
+                    egui::RichText::new(thousands(self.game.score as usize))
                         .size(34.0)
                         .color(TEXT)
                         .strong(),
@@ -607,24 +605,33 @@ impl WordLegendApp {
         let found = format!("{} found", self.game.found.len());
         let name = self.identity.as_ref().map(|i| i.name.clone()).unwrap_or_default();
         let (link, link_color) = self.link_label();
-        ui.columns(3, |cols| {
-            // During a round, LEAVE takes the top left and the name gives way; the
-            // name is on the home screen.
-            let (score_col, rank_col) = if playing { (1, 2) } else { (0, 1) };
+        // Left to right, each group at its own width with a small gap after it, so
+        // the bar reads as one line of facts. Equal columns spread three short
+        // things across the whole width and stretched LEAVE to fill its third.
+        ui.horizontal(|ui| {
             if playing {
-                cols[0].add_space(2.0);
-                leave = action_button(&mut cols[0], "LEAVE", RED).clicked();
-            } else {
-                cols[2].label(egui::RichText::new(&name).size(13.0).color(TEXT).strong());
+                leave = action_button(ui, "LEAVE", RED).clicked();
+                ui.add_space(16.0);
             }
-
-            cols[score_col].label(egui::RichText::new(&score).size(26.0).color(TEXT).strong());
-            // The found-words panel does not fit on a phone; the count does.
-            cols[score_col].label(egui::RichText::new(&found).size(11.0).color(MUTED));
-
-            cols[rank_col].add_space(4.0);
-            rank_label(&mut cols[rank_col], league, 14.0);
-            cols[rank_col].label(egui::RichText::new(&link).size(11.0).color(link_color).strong());
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new(&score).size(26.0).color(TEXT).strong());
+                // The found-words panel does not fit on a phone; the count does.
+                ui.label(egui::RichText::new(&found).size(11.0).color(MUTED));
+            });
+            ui.add_space(20.0);
+            ui.vertical(|ui| {
+                ui.add_space(4.0);
+                rank_label(ui, league, 14.0);
+                ui.label(egui::RichText::new(&link).size(11.0).color(link_color).strong());
+            });
+            // The name is on the home screen; during a round LEAVE has its room.
+            if !playing {
+                ui.add_space(20.0);
+                ui.vertical(|ui| {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(&name).size(13.0).color(TEXT).strong());
+                });
+            }
         });
         if leave {
             self.confirm_leave = true;
@@ -1136,88 +1143,90 @@ impl WordLegendApp {
         if is_narrow(ctx) {
             return self.page(ctx, false, |app, ui| app.results_page(ui));
         }
-        self.overlay(ctx, |app, ui| {
-            ui.label(egui::RichText::new("TIME'S UP").size(15.0).color(MUTED).strong());
-            ui.label(egui::RichText::new(format!("{}", app.game.score)).size(46.0).color(GOLD).strong());
-            ui.label(
-                egui::RichText::new(LEAGUES[app.game.ranking.league].name.to_uppercase())
-                    .size(20.0)
-                    .color(league_color(app.game.ranking.league))
-                    .strong(),
-            );
+        self.page(ctx, true, |app, ui| {
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new("TIME'S UP").size(15.0).color(MUTED).strong());
+                ui.label(egui::RichText::new(format!("{}", app.game.score)).size(46.0).color(GOLD).strong());
+                ui.label(
+                    egui::RichText::new(LEAGUES[app.game.ranking.league].name.to_uppercase())
+                        .size(20.0)
+                        .color(league_color(app.game.ranking.league))
+                        .strong(),
+                );
 
-            if app.game.is_new_best() {
-                ui.label(egui::RichText::new("\u{2605} NEW PERSONAL BEST").size(14.0).color(GOLD).strong());
-            }
-
-            ui.add_space(14.0);
-
-            // The columns below need this much room; with less -- a phone, a small
-            // tablet -- the card stacks them instead.
-            const COLUMNS_WIDTH: f32 = 196.0 + 16.0 + 250.0 + 16.0 + 300.0;
-            let narrow = ui.available_width() < COLUMNS_WIDTH;
-
-            // The board you just played, the numbers that came out of it, and where
-            // that leaves you in the league: side by side on a desktop, so the card
-            // still fits; one above another on a phone, where it scrolls.
-            if narrow {
-                app.used_board(ui, 180.0);
-                ui.add_space(12.0);
-                app.stacked(ui, |app, ui| app.round_stats(ui));
-                ui.add_space(12.0);
-                app.stacked(ui, |app, ui| app.form_panel(ui));
-            } else {
-                ui.horizontal_top(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_width(196.0);
-                        app.used_board(ui, 180.0);
-                    });
-                    ui.add_space(16.0);
-                    ui.vertical(|ui| {
-                        ui.set_width(250.0);
-                        app.round_stats(ui);
-                    });
-                    ui.add_space(16.0);
-                    ui.vertical(|ui| {
-                        ui.set_width(300.0);
-                        app.form_panel(ui);
-                    });
-                });
-            }
-
-            ui.add_space(12.0);
-            app.rank_banner(ui);
-            app.unplayed_notice(ui);
-
-            match app.game.round {
-                Some(round) if narrow => {
-                    app.stacked(ui, |app, ui| app.leaderboard(ui, round));
-                    ui.add_space(12.0);
-                    app.stacked(ui, |app, ui| app.word_area(ui, 130.0));
-                    ui.add_space(18.0);
-                    app.results_footer(ui);
+                if app.game.is_new_best() {
+                    ui.label(egui::RichText::new("\u{2605} NEW PERSONAL BEST").size(14.0).color(GOLD).strong());
                 }
-                Some(round) => {
+
+                ui.add_space(14.0);
+
+                // The columns below need this much room; with less -- a phone, a small
+                // tablet -- the card stacks them instead.
+                const COLUMNS_WIDTH: f32 = 196.0 + 16.0 + 250.0 + 16.0 + 300.0;
+                let narrow = ui.available_width() < COLUMNS_WIDTH;
+
+                // The board you just played, the numbers that came out of it, and where
+                // that leaves you in the league: side by side on a desktop, so the card
+                // still fits; one above another on a phone, where it scrolls.
+                if narrow {
+                    app.used_board(ui, 180.0);
+                    ui.add_space(12.0);
+                    app.stacked(ui, |app, ui| app.round_stats(ui));
+                    ui.add_space(12.0);
+                    app.stacked(ui, |app, ui| app.form_panel(ui));
+                } else {
                     ui.horizontal_top(|ui| {
                         ui.vertical(|ui| {
-                            ui.set_width(300.0);
-                            app.leaderboard(ui, round);
+                            ui.set_width(196.0);
+                            app.used_board(ui, 180.0);
                         });
                         ui.add_space(16.0);
                         ui.vertical(|ui| {
-                            ui.set_width((ui.available_width()).max(200.0));
-                            app.word_area(ui, 130.0);
+                            ui.set_width(250.0);
+                            app.round_stats(ui);
+                        });
+                        ui.add_space(16.0);
+                        ui.vertical(|ui| {
+                            ui.set_width(300.0);
+                            app.form_panel(ui);
                         });
                     });
-                    ui.add_space(18.0);
-                    app.results_footer(ui);
                 }
-                None => {
-                    app.word_area(ui, 130.0);
-                    ui.add_space(18.0);
-                    app.results_footer(ui);
+
+                ui.add_space(12.0);
+                app.rank_banner(ui);
+                app.unplayed_notice(ui);
+
+                match app.game.round {
+                    Some(round) if narrow => {
+                        app.stacked(ui, |app, ui| app.leaderboard(ui, round));
+                        ui.add_space(12.0);
+                        app.stacked(ui, |app, ui| app.word_area(ui, 130.0));
+                        ui.add_space(18.0);
+                        app.results_footer(ui);
+                    }
+                    Some(round) => {
+                        ui.horizontal_top(|ui| {
+                            ui.vertical(|ui| {
+                                ui.set_width(300.0);
+                                app.leaderboard(ui, round);
+                            });
+                            ui.add_space(16.0);
+                            ui.vertical(|ui| {
+                                ui.set_width((ui.available_width()).max(200.0));
+                                app.word_area(ui, 130.0);
+                            });
+                        });
+                        ui.add_space(18.0);
+                        app.results_footer(ui);
+                    }
+                    None => {
+                        app.word_area(ui, 130.0);
+                        ui.add_space(18.0);
+                        app.results_footer(ui);
+                    }
                 }
-            }
+            });
         });
     }
 
@@ -1946,26 +1955,26 @@ impl WordLegendApp {
     /// the screen; elsewhere it is the usual centred card. `scroll` lets a long page scroll; the phone scorecard
     /// passes false, since it is laid out to fit and scrolls only its word list.
     fn page(&mut self, ctx: &egui::Context, scroll: bool, contents: impl FnOnce(&mut Self, &mut egui::Ui)) {
-        if !is_narrow(ctx) {
-            return self.overlay(ctx, |app, ui| {
-                ui.vertical(|ui| contents(app, ui));
-            });
-        }
         let screen = ctx.screen_rect();
-        const MARGIN: f32 = 12.0;
+        let margin = if is_narrow(ctx) { 12.0 } else { 24.0 };
+        /// On a wide window the page keeps to a column this wide in the middle, so
+        /// lines of text and rows of numbers do not stretch across the monitor.
+        const COLUMN: f32 = 960.0;
         egui::Area::new(egui::Id::new("page"))
             .order(egui::Order::Foreground)
             .fixed_pos(screen.min)
             .show(ctx, |ui| {
                 ui.painter().rect_filled(screen, 0.0, BG);
-                let inner = screen.shrink(MARGIN);
-                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner), |ui| {
-                    ui.set_width(inner.width());
-                    ui.set_max_height(inner.height());
+                let inner = screen.shrink(margin);
+                let width = inner.width().min(COLUMN);
+                let column = Rect::from_min_size(Pos2::new(screen.center().x - width / 2.0, inner.min.y), Vec2::new(width, inner.height()));
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(column), |ui| {
+                    ui.set_width(width);
+                    ui.set_max_height(column.height());
                     if scroll {
                         egui::ScrollArea::vertical()
                             .id_salt("page_scroll")
-                            .max_height(inner.height())
+                            .max_height(column.height())
                             .auto_shrink([false, true])
                             .show(ui, |ui| contents(self, ui));
                     } else {
@@ -2018,54 +2027,6 @@ impl WordLegendApp {
         ui.add_space(8.0);
     }
 
-    /// Dim everything and centre a card on top of it.
-    fn overlay(&mut self, ctx: &egui::Context, contents: impl FnOnce(&mut Self, &mut egui::Ui)) {
-        let screen = ctx.screen_rect();
-        let painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Middle,
-            egui::Id::new("overlay_dim"),
-        ));
-        painter.rect_filled(screen, 0.0, BG.gamma_multiply(0.88));
-
-        // Pinned near the top rather than centred: an Area anchored to the centre
-        // only gets the space below its own origin, which capped the scroll area
-        // at ~400px and hid the button under a fold.
-        let narrow = screen.width() < NARROW;
-        let margin: f32 = if narrow { 10.0 } else { 24.0 };
-        let inner: i8 = if narrow { 16 } else { 30 };
-        let width = 900.0_f32.min(screen.width() - margin * 2.0);
-
-        egui::Area::new(egui::Id::new("overlay"))
-            .order(egui::Order::Foreground)
-            .anchor(Align2::CENTER_TOP, Vec2::new(0.0, margin))
-            .show(ctx, |ui| {
-                ui.set_width(width);
-                egui::Frame::default()
-                    .fill(PANEL)
-                    .stroke(Stroke::new(1.0_f32, TILE_EDGE))
-                    .corner_radius(18.0)
-                    .inner_margin(egui::Margin::same(inner))
-                    .show(ui, |ui| {
-                        // Laid out directly when there is room: a ScrollArea here
-                        // collapses to about 400px regardless of the max height it
-                        // is given, which hid the button under a fold. On a window
-                        // too short for the card -- a phone in landscape, say --
-                        // scrolling beats an unreachable button.
-                        // A phone's cards are stacked and long, so they always scroll.
-                        if screen.height() < SHORT_WINDOW || narrow {
-                            egui::ScrollArea::vertical()
-                                .id_salt("overlay_scroll")
-                                .max_height(screen.height() - margin * 2.0 - inner as f32 * 2.0)
-                                .auto_shrink([false, true])
-                                .show(ui, |ui| {
-                                    ui.vertical_centered(|ui| contents(self, ui));
-                                });
-                        } else {
-                            ui.vertical_centered(|ui| contents(self, ui));
-                        }
-                    });
-            });
-    }
 }
 
 /// Where the tiles sit, and which one a point is on.
@@ -2622,7 +2583,7 @@ mod tests {
         assert!(!ctx.fonts(|f| f.has_glyphs(&font, "\u{30fb}")));
     }
 
-    /// Lay out an overlay headlessly at the real window size and report the card's
+    /// Lay out a dialog headlessly at the real window size and report its page's
     /// rect. Two passes: an Area only knows its size after it has been shown once.
     fn overlay_rect_at(
         app: &mut WordLegendApp,
@@ -2635,8 +2596,8 @@ mod tests {
             let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
             let _ = ctx.run(input, |ctx| draw(app, ctx));
         }
-        let state = egui::AreaState::load(&ctx, egui::Id::new("overlay")).expect("overlay shown");
-        Rect::from_min_size(state.left_top_pos(), state.size.expect("overlay sized"))
+        let state = egui::AreaState::load(&ctx, egui::Id::new("page")).expect("page shown");
+        Rect::from_min_size(state.left_top_pos(), state.size.expect("page sized"))
     }
 
     fn overlay_rect(app: &mut WordLegendApp, draw: fn(&mut WordLegendApp, &egui::Context)) -> Rect {
@@ -3470,7 +3431,7 @@ mod tests {
 
     #[test]
     fn leaving_a_round_asks_first_then_banks_the_score_and_goes_home() {
-        for size in [PHONES[0], Vec2::new(1000.0, 780.0)] {
+        for size in [PHONES[0], Vec2::new(800.0, 700.0), Vec2::new(1000.0, 780.0)] {
             let mut app = offline_app(true);
             app.game.start_round();
             app.game.theme = Some("Halloween".into());
@@ -3491,6 +3452,29 @@ mod tests {
             assert!(bar_leave.x < size.x / 3.0, "LEAVE is not at the left of the bar at {size:?}: {bar_leave:?}");
             let leaves = texts.iter().filter(|t| t.eq_ignore_ascii_case("leave") || *t == "Leave round").count();
             assert_eq!(leaves, 1, "there should be exactly one way to leave on screen at {size:?}");
+
+            // The bar reads as one group, not three facts spread across the width:
+            // the score sits just after LEAVE, and the rank just after the score.
+            let score_left = shapes
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) if t.galley.job.text == "2,400" && s.visual_bounding_rect().min.y < 130.0 => Some(s.visual_bounding_rect()),
+                    _ => None,
+                })
+                .next()
+                .expect("the score in the bar");
+            let rank_left = text_centre(&shapes, "Rank: Bronze").expect("the rank in the bar");
+            let leave_rect = shapes
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Rect(r) if r.fill == RED && r.rect.contains(bar_leave) => Some(r.rect),
+                    _ => None,
+                })
+                .next()
+                .expect("LEAVE is not a filled button");
+            assert!(leave_rect.width() <= 140.0, "LEAVE is stretched to {}px at {size:?}", leave_rect.width());
+            assert!(score_left.min.x - leave_rect.max.x < 40.0, "the score is far from LEAVE at {size:?}");
+            assert!(rank_left.x - score_left.max.x < 160.0, "the rank is far from the score at {size:?}");
 
             // Its label is centred on the button.
             let button = shapes
@@ -3617,10 +3601,11 @@ mod tests {
         }
     }
 
-    /// On a phone every dialog is a whole screen, not a card over the board.
+    /// Every dialog is a whole screen, on a phone and on a desktop, not a card
+    /// over the board.
     #[test]
-    fn every_dialog_is_full_screen_on_a_phone() {
-        for size in PHONES.iter().take(2).copied() {
+    fn every_dialog_is_full_screen() {
+        for size in [PHONES[0], PHONES[1], Vec2::new(1000.0, 780.0), Vec2::new(1600.0, 1000.0)] {
             let screens: [(&str, fn(&mut WordLegendApp)); 5] = [
                 ("signup", |app| app.identity = None),
                 ("restore", |app| {
@@ -3639,13 +3624,13 @@ mod tests {
             for (name, set_up) in screens {
                 let mut app = offline_app(true);
                 set_up(&mut app);
-                let (ctx, _) = run_frames(&mut app, size, 4);
-                let page = egui::AreaState::load(&ctx, egui::Id::new("page"));
-                assert!(page.is_some(), "{name} at {size:?} is not a full-screen page");
-                assert!(
-                    egui::AreaState::load(&ctx, egui::Id::new("overlay")).is_none(),
-                    "{name} at {size:?} is still a card"
-                );
+                let (ctx, shapes) = run_frames(&mut app, size, 12);
+                assert!(egui::AreaState::load(&ctx, egui::Id::new("page")).is_some(), "{name} at {size:?} is not a page");
+                // Its background covers the whole screen, with nothing of the board
+                // showing around it.
+                let covered = shapes.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.fill == BG && r.rect.width() >= size.x && r.rect.height() >= size.y));
+                assert!(covered, "{name} at {size:?} does not fill the screen");
+                assert_fits(name, &shapes, size);
             }
         }
     }
