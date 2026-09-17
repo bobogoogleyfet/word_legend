@@ -27,18 +27,8 @@ const BLUE: Color32 = Color32::from_rgb(0x5b, 0x8c, 0xff);
 const SERIES_SCORES: Color32 = Color32::from_rgb(0x39, 0x87, 0xe5);
 const SERIES_AVERAGE: Color32 = Color32::from_rgb(0xc9, 0x85, 0x00);
 
-/// The logo's tile colours, in order: the reference palette's dark categorical
-/// steps, deep enough to carry white letters.
-const LOGO_TILES: [Color32; 8] = [
-    Color32::from_rgb(0x39, 0x87, 0xe5),
-    Color32::from_rgb(0xd9, 0x59, 0x26),
-    Color32::from_rgb(0x19, 0x9e, 0x70),
-    Color32::from_rgb(0xc9, 0x85, 0x00),
-    Color32::from_rgb(0xd5, 0x51, 0x81),
-    Color32::from_rgb(0x00, 0x83, 0x00),
-    Color32::from_rgb(0x90, 0x85, 0xe9),
-    Color32::from_rgb(0xe6, 0x67, 0x67),
-];
+/// The logo's tiles: black, with gold letters and a gold edge.
+const LOGO_TILE: Color32 = Color32::from_rgb(0x0a, 0x0a, 0x0c);
 
 /// The scorecard's tabs. The leaderboard opens first on a shared round.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -129,6 +119,19 @@ pub struct WordLegendApp {
     elapsed: f32,
     /// When the recovery code was last copied from the start screen, to confirm it.
     code_copied_at: Option<f64>,
+    /// The home screen's PLAY tiles, traced like a board.
+    play_swipe: PlaySwipe,
+}
+
+/// A swipe across the home screen's PLAY tiles. Starting a game the way a word is
+/// played teaches the gesture before the first round.
+#[derive(Default)]
+struct PlaySwipe {
+    /// Tiles traced so far, by index into P-L-A-Y.
+    trail: Vec<usize>,
+    from: Option<Pos2>,
+    /// The player tapped, or swiped something other than PLAY: say how it works.
+    show_hint: bool,
 }
 
 impl WordLegendApp {
@@ -145,6 +148,7 @@ impl WordLegendApp {
             drag_from: None,
             elapsed: 0.0,
             code_copied_at: None,
+            play_swipe: PlaySwipe::default(),
         }
     }
 }
@@ -760,8 +764,17 @@ impl WordLegendApp {
         if response.drag_started() {
             self.game.is_dragging = true;
             self.game.clear_path();
-            if let Some(at) = pointer.and_then(|p| geom.tile_at(p)) {
+            // A drag only registers once the pointer has moved a few pixels, and a
+            // quick flick can be a whole tile away by then. Start from where it
+            // came down, and trace the travel since, or the first letter is lost.
+            let origin = ui_press_origin(response).or(pointer);
+            if let Some(at) = origin.and_then(|p| geom.tile_at(p)) {
                 self.game.begin_path(at);
+            }
+            if let (Some(from), Some(to)) = (origin, pointer) {
+                for at in geom.tiles_along(from, to) {
+                    self.game.extend_path(at);
+                }
             }
             self.drag_from = pointer;
         } else if response.dragged() && self.game.is_dragging {
@@ -946,7 +959,14 @@ impl WordLegendApp {
 
                 ui.add_space(26.0);
                 let (_, note, color) = app.join_prompt();
-                if play_band(ui) {
+                let (prompt, prompt_color) = if app.play_swipe.show_hint {
+                    ("Swipe across the letters, P to Y, like a word in a round", AMBER)
+                } else {
+                    ("Swipe PLAY to play", MUTED)
+                };
+                ui.label(egui::RichText::new(prompt).size(13.0).color(prompt_color).strong());
+                ui.add_space(6.0);
+                if play_band(ui, &mut app.play_swipe) {
                     app.live.play_now(&mut app.game, app.now);
                 }
                 ui.add_space(8.0);
@@ -2017,11 +2037,10 @@ fn use_stars(painter: &egui::Painter, tile: Rect, uses: u32) {
     }
 }
 
-/// WORD over LEGEND in coloured letter tiles.
+/// WORD over LEGEND in black and gold letter tiles.
 fn logo(ui: &mut egui::Ui) {
     const GAP: f32 = 5.0;
     let size = ((ui.available_width() - GAP * 5.0) / 6.0).min(48.0);
-    let mut colour = 0;
     for word in ["WORD", "LEGEND"] {
         let width = word.len() as f32 * size + (word.len() - 1) as f32 * GAP;
         let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), size), Sense::hover());
@@ -2029,38 +2048,108 @@ fn logo(ui: &mut egui::Ui) {
         let start = row.center().x - width / 2.0;
         for (i, letter) in word.chars().enumerate() {
             let tile = Rect::from_min_size(Pos2::new(start + i as f32 * (size + GAP), row.min.y), Vec2::splat(size));
-            let fill = LOGO_TILES[colour % LOGO_TILES.len()];
-            colour += 1;
-            painter.rect_filled(tile, size * 0.18, fill);
-            painter.rect_stroke(tile, size * 0.18, Stroke::new(2.0_f32, fill.gamma_multiply(0.6)), egui::StrokeKind::Inside);
-            painter.text(tile.center(), Align2::CENTER_CENTER, letter, FontId::proportional(size * 0.62), Color32::WHITE);
+            painter.rect_filled(tile, size * 0.18, LOGO_TILE);
+            painter.rect_stroke(tile, size * 0.18, Stroke::new(2.0_f32, GOLD), egui::StrokeKind::Inside);
+            painter.text(tile.center(), Align2::CENTER_CENTER, letter, FontId::proportional(size * 0.62), GOLD);
         }
         ui.add_space(GAP);
     }
 }
 
-/// PLAY spelled in big tiles across a band: the whole band is the button.
-fn play_band(ui: &mut egui::Ui) -> bool {
+/// Where the pointer came down for the drag or press this response is part of.
+fn ui_press_origin(response: &egui::Response) -> Option<Pos2> {
+    response.ctx.input(|i| i.pointer.press_origin())
+}
+
+/// PLAY spelled in tiles across a band, played like the board: swipe P-L-A-Y in
+/// order to start. The same circles decide what a swipe touches, the same trail
+/// follows the finger, and tracing back over a tile rewinds to it. A tap or any
+/// other swipe starts nothing and turns on the hint above.
+fn play_band(ui: &mut egui::Ui, swipe: &mut PlaySwipe) -> bool {
     const GAP: f32 = 8.0;
+    const WORD: [char; 4] = ['P', 'L', 'A', 'Y'];
     let size = ((ui.available_width() - 40.0 - GAP * 3.0) / 4.0).min(66.0);
     let (band, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), size + 28.0), Sense::click());
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let painter = ui.painter();
-    let hot = response.hovered();
-    painter.rect_filled(band, 0.0, if hot { TILE } else { PANEL });
-    painter.line_segment([band.left_top(), band.right_top()], Stroke::new(2.0_f32, ACCENT));
-    painter.line_segment([band.left_bottom(), band.right_bottom()], Stroke::new(2.0_f32, ACCENT));
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), size + 28.0), Sense::click_and_drag());
 
     let width = size * 4.0 + GAP * 3.0;
     let start = band.center().x - width / 2.0;
-    for (i, letter) in "PLAY".chars().enumerate() {
-        let tile = Rect::from_min_size(Pos2::new(start + i as f32 * (size + GAP), band.center().y - size / 2.0), Vec2::splat(size));
-        painter.rect_filled(tile, size * 0.16, if hot { ACCENT } else { ACCENT.gamma_multiply(0.85) });
-        painter.rect_stroke(tile, size * 0.16, Stroke::new(2.0_f32, Color32::WHITE), egui::StrokeKind::Inside);
-        painter.text(tile.center(), Align2::CENTER_CENTER, letter, FontId::proportional(size * 0.6), Color32::WHITE);
+    let tiles: Vec<Rect> = (0..4)
+        .map(|i| Rect::from_min_size(Pos2::new(start + i as f32 * (size + GAP), band.center().y - size / 2.0), Vec2::splat(size)))
+        .collect();
+    let near = |p: Pos2| tiles.iter().position(|t| t.center().distance(p) <= size * DRAG_HIT_RADIUS);
+    let along = |from: Pos2, to: Pos2| {
+        let steps = ((from.distance(to) / (size * 0.1)).ceil() as usize).clamp(1, 512);
+        let mut hit: Vec<usize> = Vec::new();
+        for i in 0..=steps {
+            if let Some(t) = near(from + (to - from) * (i as f32 / steps as f32)) {
+                if hit.last() != Some(&t) {
+                    hit.push(t);
+                }
+            }
+        }
+        hit
+    };
+    let extend = |swipe: &mut PlaySwipe, t: usize| {
+        if let Some(i) = swipe.trail.iter().position(|x| *x == t) {
+            swipe.trail.truncate(i + 1); // back over a tile: rewind to it
+        } else if swipe.trail.last().is_none_or(|last| last.abs_diff(t) == 1) {
+            swipe.trail.push(t);
+        }
+    };
+
+    let pointer = response.interact_pointer_pos();
+    let mut played = false;
+    if response.drag_started() {
+        swipe.trail.clear();
+        let origin = ui_press_origin(&response).or(pointer);
+        if let (Some(from), Some(to)) = (origin, pointer) {
+            for t in along(from, to) {
+                extend(swipe, t);
+            }
+        }
+        swipe.from = pointer;
+    } else if response.dragged() {
+        if let (Some(from), Some(to)) = (swipe.from, pointer) {
+            for t in along(from, to) {
+                extend(swipe, t);
+            }
+            swipe.from = Some(to);
+        }
+    } else if response.clicked() {
+        swipe.show_hint = true;
     }
-    response.clicked()
+    if response.drag_stopped() {
+        played = swipe.trail == [0, 1, 2, 3];
+        if !played {
+            swipe.show_hint = true;
+        }
+        swipe.trail.clear();
+        swipe.from = None;
+    }
+
+    let painter = ui.painter();
+    painter.rect_filled(band, 0.0, PANEL);
+    painter.line_segment([band.left_top(), band.right_top()], Stroke::new(2.0_f32, GOLD));
+    painter.line_segment([band.left_bottom(), band.right_bottom()], Stroke::new(2.0_f32, GOLD));
+
+    let complete = swipe.trail == [0, 1, 2, 3];
+    let trail_color = if complete { GREEN } else { ACCENT };
+    for pair in swipe.trail.windows(2) {
+        painter.line_segment([tiles[pair[0]].center(), tiles[pair[1]].center()], Stroke::new(12.0_f32, trail_color.gamma_multiply(0.7)));
+    }
+    for (i, tile) in tiles.iter().enumerate() {
+        let lit = swipe.trail.contains(&i);
+        let (fill, edge, ink) = if lit {
+            (trail_color.gamma_multiply(0.35), trail_color, Color32::WHITE)
+        } else {
+            (TILE, TILE_EDGE, TEXT)
+        };
+        painter.rect_filled(*tile, size * 0.18, fill);
+        painter.rect_stroke(*tile, size * 0.18, Stroke::new(2.0_f32, edge), egui::StrokeKind::Inside);
+        painter.text(tile.center(), Align2::CENTER_CENTER, WORD[i], FontId::proportional(size * 0.5), ink);
+    }
+    played
 }
 
 /// A square button with a drawn icon over a short label.
@@ -2709,7 +2798,8 @@ mod tests {
                 painted(ctx.run(input, |ctx| app.frame(ctx)).shapes)
             };
             let mut shapes = Vec::new();
-            for _ in 0..4 {
+            // Enough frames for the card to finish fading in, so colours are exact.
+            for _ in 0..12 {
                 shapes = frame(&mut app, vec![]);
             }
             assert_fits("home screen", &shapes, size);
@@ -2722,25 +2812,62 @@ mod tests {
                 assert!(texts.iter().any(|t| t == letter), "no {letter} tile at {size:?}");
             }
 
-            // Tap the Y of PLAY.
-            let y_tile = shapes
+            // The logo is black and gold.
+            let gold_letters = shapes
                 .iter()
-                .filter_map(|s| match s {
-                    egui::Shape::Text(t) if t.galley.job.text == "Y" => Some(s.visual_bounding_rect().center()),
-                    _ => None,
-                })
-                .last()
-                .expect("a Y tile");
-            let press = |pressed| egui::Event::PointerButton {
-                pos: y_tile,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: Default::default(),
+                .filter(|s| matches!(s, egui::Shape::Text(t) if t.galley.job.text == "W" && t.galley.job.sections[0].format.color == GOLD))
+                .count();
+            assert_eq!(gold_letters, 1, "the W of the logo is not gold at {size:?}");
+            assert!(
+                shapes.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.fill == LOGO_TILE)),
+                "no black logo tiles at {size:?}"
+            );
+
+            let centre_of = |shapes: &[egui::Shape], letter: &str| {
+                shapes
+                    .iter()
+                    .filter_map(|s| match s {
+                        egui::Shape::Text(t) if t.galley.job.text == letter => Some(s.visual_bounding_rect().center()),
+                        _ => None,
+                    })
+                    .last()
+                    .unwrap_or_else(|| panic!("no {letter} tile"))
             };
-            frame(&mut app, vec![egui::Event::PointerMoved(y_tile)]);
-            frame(&mut app, vec![press(true)]);
-            frame(&mut app, vec![press(false)]);
-            assert!(app.live.joined(), "tapping PLAY at {size:?} did not join");
+            let (p, l, a, y) = (centre_of(&shapes, "P"), centre_of(&shapes, "L"), centre_of(&shapes, "A"), centre_of(&shapes, "Y"));
+            let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+
+            // A tap on PLAY starts nothing; it explains the swipe instead.
+            frame(&mut app, vec![egui::Event::PointerMoved(y), button(y, true)]);
+            frame(&mut app, vec![button(y, false)]);
+            let shapes = frame(&mut app, vec![]);
+            assert!(!app.live.joined(), "a tap started the game at {size:?}");
+            assert!(texts_of(&shapes).iter().any(|t| t.starts_with("Swipe across the letters")), "no hint after a tap");
+
+            // P-L-A and let go: not PLAY, so nothing.
+            frame(&mut app, vec![egui::Event::PointerMoved(p), button(p, true)]);
+            frame(&mut app, vec![egui::Event::PointerMoved(l)]);
+            frame(&mut app, vec![egui::Event::PointerMoved(a)]);
+            frame(&mut app, vec![button(a, false)]);
+            assert!(!app.live.joined(), "a partial swipe started the game at {size:?}");
+
+            // Y-A-L-P backwards is not PLAY either.
+            frame(&mut app, vec![egui::Event::PointerMoved(y), button(y, true)]);
+            frame(&mut app, vec![egui::Event::PointerMoved(p)]);
+            frame(&mut app, vec![button(p, false)]);
+            assert!(!app.live.joined(), "a backwards swipe started the game at {size:?}");
+
+            // P-L-A-Y, lit up along the way, and let go: that plays.
+            frame(&mut app, vec![egui::Event::PointerMoved(p), button(p, true)]);
+            frame(&mut app, vec![egui::Event::PointerMoved(l)]);
+            frame(&mut app, vec![egui::Event::PointerMoved(a)]);
+            let lit = frame(&mut app, vec![egui::Event::PointerMoved(y)]);
+            assert_eq!(app.play_swipe.trail, vec![0, 1, 2, 3], "the swipe did not trace PLAY at {size:?}");
+            assert!(
+                lit.iter().any(|s| matches!(s, egui::Shape::LineSegment { stroke, .. } if stroke.width == 12.0)),
+                "no trail drawn under the swipe at {size:?}"
+            );
+            frame(&mut app, vec![button(y, false)]);
+            assert!(app.live.joined(), "swiping PLAY at {size:?} did not join");
         }
     }
 
@@ -2841,6 +2968,52 @@ mod tests {
             let tile = board_tiles.iter().find(|t| t.contains(*at)).expect("a star outside every tile");
             assert!(at.x > tile.center().x && at.y > tile.center().y, "star at {at:?} is not bottom-right in {tile:?}");
         }
+    }
+
+    /// The sixteen board tiles' centres from a playing frame, row by row.
+    fn board_centres(shapes: &[egui::Shape]) -> Vec<Pos2> {
+        let mut tiles: Vec<Rect> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Rect(r) if r.fill == TILE && r.rect.width() > 40.0 && (r.rect.width() - r.rect.height()).abs() < 1.0 => {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+            .collect();
+        tiles.sort_by(|a, b| (a.min.y, a.min.x).partial_cmp(&(b.min.y, b.min.x)).unwrap());
+        assert_eq!(tiles.len(), 16, "expected the board's sixteen tiles");
+        tiles.iter().map(|t| t.center()).collect()
+    }
+
+    #[test]
+    fn a_quick_swipe_keeps_the_letter_it_started_on() {
+        let size = Vec2::new(1000.0, 780.0);
+        let mut app = offline_app(true);
+        app.game.start_round();
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, size);
+        let frame = |app: &mut WordLegendApp, events: Vec<egui::Event>| {
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            painted(ctx.run(input, |ctx| app.frame(ctx)).shapes)
+        };
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            shapes = frame(&mut app, vec![]);
+        }
+        let c = board_centres(&shapes);
+        let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+
+        // Touch the top-left tile, and in the very next frame be on the tile
+        // diagonally below it: a quick flick.
+        frame(&mut app, vec![egui::Event::PointerMoved(c[0]), button(c[0], true)]);
+        frame(&mut app, vec![egui::Event::PointerMoved(c[5])]);
+        let path = app.game.path.clone();
+        assert_eq!(
+            path,
+            vec![Position { row: 0, col: 0 }, Position { row: 1, col: 1 }],
+            "the swipe lost the letter it started on"
+        );
     }
 
     #[test]
