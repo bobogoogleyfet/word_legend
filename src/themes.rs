@@ -111,11 +111,16 @@ mod tests {
     #[test]
     fn the_named_categories_are_present() {
         let themes = Themes::load();
-        for name in ["Animals", "Food", "Countries", "Verbs", "Science"] {
+        for name in ["Animals", "Food", "Halloween", "Verbs", "Science"] {
             assert!(themes.get(name).is_some(), "missing {name}");
         }
         assert!(themes.get("Animals").unwrap().all.contains("otter"));
-        assert!(themes.get("Countries").unwrap().all.contains("cuba"));
+        assert!(themes.get("Halloween").unwrap().all.contains("pumpkin"));
+        // Themes of names -- countries, capitals, states -- are gone: the game does
+        // not accept names, and they could never hold twenty words on one board.
+        for name in ["Countries", "Capitals", "States"] {
+            assert!(themes.get(name).is_none(), "{name} is a theme of names");
+        }
     }
 
     #[test]

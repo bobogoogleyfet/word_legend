@@ -88,6 +88,8 @@ for thirty rounds and then turns up twice in a row:
 - **The other four are themed.** A themed board holds **at least twenty words
   from its theme**, plurals included — Animals, Food, Nature, Body, Music,
   Science, Math, History, Verbs and Adjectives rotate evenly, never back to back.
+  (Themes of names — countries, capitals, states — are gone: the game does not
+  accept names, and no board could hold twenty of them.)
 - **Each month favours its season.** One round in five is the month's theme:
 
   | Month | Theme | Month | Theme |
@@ -189,13 +191,20 @@ play, so everyone in the round is already on the table when it ends. Each round'
 table lives in its own Durable Object, which keeps simultaneous submissions from
 overwriting each other.
 
-**The dictionary has two tiers.** The game accepts 434,639 words: ENABLE (public
+**The dictionary has two tiers.** The game accepts 424,459 words: ENABLE (public
 domain) together with SCOWL at its largest size, 95 — the biggest freely usable
 English word list, rare and archaic words included. The Oxford English Dictionary
 is not free to use or copy, so it cannot be included. About 63,000 everyday words
 form the **Common** tier that boards are built from and judged against; the rest
 are **Obscure**: accepted, and worth 10% more, but never held against you on a
-scorecard. See [`licenses/`](licenses/) for the word lists' notices.
+scorecard.
+
+What SCOWL adds is filtered against its own lists: no acronyms or initialisms
+(NASA, HTML), no names of people, places or brands (LONDON, MARY, SAO), and no
+foreign words (HOLA, MERCI, DANKE). Days, months and festivals stay, since a
+player expects to be able to spell HALLOWEEN or MONDAY. Nothing is taken out of
+ENABLE, so words that are also names — JOHN, PARIS, CHAD — and settled loanwords
+like FIESTA remain. See [`licenses/`](licenses/) for the word lists' notices.
 
 ## Layout
 

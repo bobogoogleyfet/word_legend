@@ -9,8 +9,10 @@
   and distributed provided its copyright notice and permission notice appear in
   all copies; they are reproduced in full in `SCOWL-Copyright.txt`.
 
-Only lowercase words made of the letters a–z are included: no proper nouns,
-abbreviations, contractions or accented words.
+Only lowercase words made of the letters a–z are included, and what SCOWL adds is
+filtered against SCOWL's own lists: no acronyms or initialisms, no names of
+people, places or brands, and no foreign words. Days, months and festivals are
+kept. Nothing is removed from ENABLE.
 
 `common.txt`, the everyday tier boards are built from, is SCOWL at a smaller size
 intersected with the accepted list.
