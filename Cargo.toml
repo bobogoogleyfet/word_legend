@@ -43,3 +43,10 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 panic = "abort"
+
+[patch.crates-io]
+# egui_glow 0.31.1 with its shaders raised from mediump to highp precision; see
+# vendor/egui_glow/src/shader/*.glsl. On phone GPUs mediump is 16-bit, and text
+# rendered with slivers of neighbouring glyphs beside each letter. Drop this
+# patch when upgrading to an egui_glow that no longer uses mediump.
+egui_glow = { path = "vendor/egui_glow" }
