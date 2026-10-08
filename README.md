@@ -14,7 +14,7 @@ the desktop.
 ### Getting in
 
 There is no email and no password. The first time you open the game it shows a
-**recovery code** and asks for a display name. The code *is* the account: copy it
+**recovery code** and asks for a display name. The code *is* your **only access to the account**: copy it
 (the icon beside it, or select it and Ctrl+C) and keep it somewhere safe. On
 another device, choose **I already have a code** and paste it in.
 
