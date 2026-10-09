@@ -1,9 +1,11 @@
 name: Deploy to GitHub Pages
 
+# One Pages site serves both builds: main at the root, wip under /wip/ for testing
+# changes before they reach main. Either branch's push rebuilds both, since each
+# deploy replaces the whole site.
 on:
   push:
-    # This repo is on master; main is here so a rename doesn't silently stop deploys.
-    branches: [main, master]
+    branches: [main, wip]
   workflow_dispatch:
 
 # Lets the workflow publish to Pages.
@@ -22,6 +24,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+
+      - uses: actions/checkout@v4
+        with:
+          ref: wip
+          path: wip
 
       # Also flips the Pages source to "GitHub Actions" if the repo is still set to
       # publish from a branch, which would serve the repo root instead of dist/.
@@ -33,20 +43,40 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            main
+            wip
 
       - name: Install wasm-bindgen-cli
         # Version must match the wasm-bindgen crate in Cargo.lock.
         run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
 
-      - name: Run tests
-        run: cargo test --locked
+      - name: Test and build main
+        working-directory: main
+        run: |
+          cargo test --locked
+          ./build-web.sh
 
-      - name: Build the web bundle
-        run: ./build-web.sh
+      - name: Test and build wip
+        working-directory: wip
+        # Its own save slot, so testing never touches the real game's save.
+        env:
+          WORD_LEGEND_STORAGE_PREFIX: word_legend_wip
+        run: |
+          cargo test --locked
+          ./build-web.sh
+          sed -i 's|<title>Word Legend</title>|<title>Word Legend (test)</title>|' dist/index.html
+
+      - name: Put wip under /wip/
+        run: |
+          mkdir -p site
+          cp -r main/dist/. site/
+          cp -r wip/dist site/wip
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: site
 
   deploy:
     needs: build

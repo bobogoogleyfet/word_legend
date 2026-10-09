@@ -64,7 +64,10 @@ mod backend {
     }
 
     fn key(slot: &str) -> String {
-        format!("word_legend.{slot}")
+        // The test build lives on the same origin as the real one, so it keeps its
+        // save under its own prefix rather than overwriting the player's.
+        let prefix = option_env!("WORD_LEGEND_STORAGE_PREFIX").unwrap_or("word_legend");
+        format!("{prefix}.{slot}")
     }
 
     pub fn read(slot: &str) -> Option<String> {
